@@ -1,0 +1,54 @@
+# Caddyfile template for Proxmox reverse proxy
+# This file will be processed and deployed to /etc/caddy/Caddyfile
+
+{
+    email ${ACME_EMAIL}
+    ${ACME_CA_DIRECTIVE}
+}
+
+${DOMAIN} {
+    # Reverse proxy to Proxmox (using HTTPS to backend with SSL verification disabled)
+    reverse_proxy https://${INTERNAL_IP}:${PROXMOX_PORT} {
+        # Preserve original headers (only non-default ones)
+        header_up Host {host}
+        header_up X-Real-IP {remote_host}
+        
+        # WebSocket support for noVNC console and disable SSL verification
+        transport http {
+            keepalive 30s
+            keepalive_idle_conns 5
+            tls_insecure_skip_verify
+        }
+    }
+
+    # Security headers
+    header {
+        # HSTS
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        
+        # Content security
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "SAMEORIGIN"
+        X-XSS-Protection "1; mode=block"
+        
+        # Remove server info
+        -Server
+    }
+
+    # Logging
+    log {
+        output file /var/log/caddy/access.log {
+            roll_size 100mb
+            roll_keep 5
+        }
+        format json
+    }
+
+    # Error handling
+    handle_errors {
+        @502 expression {http.error.status_code} == 502
+        handle @502 {
+            respond "Proxmox is temporarily unavailable. Please try again in a moment." 502
+        }
+    }
+}

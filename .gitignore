@@ -1,0 +1,32 @@
+# Environment variables for Hetzner Proxmox Setup
+.env
+
+# Logs
+*.log
+/var/log/hetzner-proxmox-setup.log
+
+# Temporary files
+*.tmp
+*.temp
+
+# Backup files
+*.bak
+*.backup
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# SSL certificates (if locally stored)
+*.pem
+*.crt
+*.key
+
+# Config backups
+config/*.backup
