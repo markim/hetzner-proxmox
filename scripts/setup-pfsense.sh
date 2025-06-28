@@ -187,197 +187,66 @@ create_pfsense_vm() {
     log "INFO" "  - DMZ Interface: vmbr2 (10.0.2.0/24)"
 }
 
-# Generate pfSense configuration
-generate_pfsense_config() {
-    log "INFO" "Generating pfSense configuration template..."
+# Generate pfSense setup documentation
+generate_pfsense_documentation() {
+    log "INFO" "Generating pfSense setup documentation..."
     
     local config_dir="$SCRIPT_DIR/config/pfsense"
     mkdir -p "$config_dir"
     
-    # Generate basic pfSense config.xml template
-    cat > "$config_dir/config-template.xml" << EOF
-<?xml version="1.0"?>
-<pfsense>
-  <version>22.05</version>
-  <lastchange></lastchange>
-  <system>
-    <optimization>normal</optimization>
-    <hostname>pfsense</hostname>
-    <domain>local</domain>
-    <dnsserver>8.8.8.8</dnsserver>
-    <dnsserver>8.8.4.4</dnsserver>
-    <dnsallowoverride>1</dnsallowoverride>
-    <group>
-      <name>admins</name>
-      <description>System Administrators</description>
-      <scope>system</scope>
-      <gid>1998</gid>
-      <member>0</member>
-      <priv>page-all</priv>
-    </group>
-    <user>
-      <name>admin</name>
-      <descr>System Administrator</descr>
-      <scope>system</scope>
-      <groupname>admins</groupname>
-      <password>\$2y\$10\$YBAnyppx0g.akxUxwIwA2uXKhOcm7gJ/Ff1dWqXqvYRDW7Lrq6d7S</password>
-      <uid>0</uid>
-      <authorizedkeys></authorizedkeys>
-    </user>
-    <nextuid>2000</nextuid>
-    <nextgid>2000</nextgid>
-    <timezone>UTC</timezone>
-    <timeservers>0.pfsense.pool.ntp.org 1.pfsense.pool.ntp.org</timeservers>
-    <webgui>
-      <protocol>https</protocol>
-      <loginautocomplete>1</loginautocomplete>
-      <port></port>
-      <ssl-certref>61b5a4d3bdc21</ssl-certref>
-      <max_procs>2</max_procs>
-    </webgui>
-    <disablenatreflection>yes</disablenatreflection>
-    <disablechecksumoffloading>1</disablechecksumoffloading>
-    <disablesegmentationoffloading>1</disablesegmentationoffloading>
-    <disablelargereceiveoffloading>1</disablelargereceiveoffloading>
-    <ipv6allow>1</ipv6allow>
-    <powerd_ac_mode>hadp</powerd_ac_mode>
-    <powerd_battery_mode>hadp</powerd_battery_mode>
-    <bogons>
-      <interval>monthly</interval>
-    </bogons>
-    <kill_states>1</kill_states>
-    <skip_rules_graylog>1</skip_rules_graylog>
-  </system>
-  <interfaces>
-    <wan>
-      <enable>1</enable>
-      <if>vtnet0</if>
-      <descr>WAN</descr>
-      <ipaddr>$PFSENSE_WAN_IP</ipaddr>
-      <subnet>$(echo "${ADDITIONAL_NETMASKS_ARRAY[0]:-255.255.255.192}" | netmask_to_cidr)</subnet>
-      <gateway>WAN_GW</gateway>
-      <blockpriv>1</blockpriv>
-      <blockbogons>1</blockbogons>
-    </wan>
-    <lan>
-      <enable>1</enable>
-      <if>vtnet1</if>
-      <descr>LAN</descr>
-      <ipaddr>$PFSENSE_LAN_IP</ipaddr>
-      <subnet>24</subnet>
-    </lan>
-    <opt1>
-      <enable>1</enable>
-      <if>vtnet2</if>
-      <descr>DMZ</descr>
-      <ipaddr>$PFSENSE_DMZ_IP</ipaddr>
-      <subnet>24</subnet>
-    </opt1>
-  </interfaces>
-  <gateways>
-    <gateway_item>
-      <interface>wan</interface>
-      <gateway>${ADDITIONAL_GATEWAYS_ARRAY[0]:-}</gateway>
-      <name>WAN_GW</name>
-      <weight>1</weight>
-      <ipprotocol>inet</ipprotocol>
-      <interval>1</interval>
-      <descr>Interface WAN Gateway</descr>
-    </gateway_item>
-  </gateways>
-  <dhcpd>
-    <lan>
-      <enable>1</enable>
-      <range>
-        <from>10.0.1.100</from>
-        <to>10.0.1.200</to>
-      </range>
-    </lan>
-    <opt1>
-      <enable>1</enable>
-      <range>
-        <from>10.0.2.100</from>
-        <to>10.0.2.200</to>
-      </range>
-    </opt1>
-  </dhcpd>
-  <unbound>
-    <enable>1</enable>
-    <dnssec>1</dnssec>
-    <active_interface>lan,opt1</active_interface>
-    <outgoing_interface>wan</outgoing_interface>
-    <system_domain_local_zone_type>refuse</system_domain_local_zone_type>
-  </unbound>
-  <filter>
-    <rule>
-      <type>pass</type>
-      <interface>wan</interface>
-      <ipprotocol>inet</ipprotocol>
-      <tag></tag>
-      <tagged></tagged>
-      <max></max>
-      <max-src-nodes></max-src-nodes>
-      <max-src-conn></max-src-conn>
-      <max-src-states></max-src-states>
-      <statetimeout></statetimeout>
-      <statetype><![CDATA[keep state]]></statetype>
-      <os></os>
-      <protocol>tcp</protocol>
-      <source>
-        <any>1</any>
-      </source>
-      <destination>
-        <network>wanip</network>
-        <port>443</port>
-      </destination>
-      <descr><![CDATA[Allow HTTPS to pfSense WebGUI]]></descr>
-      <updated>
-        <time>1640995200</time>
-        <username>admin@192.168.1.1</username>
-      </updated>
-      <created>
-        <time>1640995200</time>
-        <username>admin@192.168.1.1</username>
-      </created>
-    </rule>
-  </filter>
-  <nat>
-    <outbound>
-      <mode>automatic</mode>
-    </outbound>
-  </nat>
-</pfsense>
+    # Generate setup instructions instead of config template
+    cat > "$config_dir/setup-instructions.md" << EOF
+# pfSense Manual Configuration Guide
+
+After pfSense installation, you'll need to configure it manually through the console or web interface.
+
+## Network Interface Configuration
+
+### WAN Interface (vtnet0)
+- **IP Address**: $PFSENSE_WAN_IP
+- **Subnet**: ${ADDITIONAL_NETMASKS_ARRAY[0]:-255.255.255.192}
+- **Gateway**: ${ADDITIONAL_GATEWAYS_ARRAY[0]:-Check your Hetzner control panel}
+
+### LAN Interface (vtnet1) 
+- **IP Address**: $PFSENSE_LAN_IP
+- **Subnet**: 255.255.255.0 (24-bit)
+- **DHCP Range**: 10.0.1.100 - 10.0.1.200
+
+### DMZ Interface (vtnet2) - Optional
+- **IP Address**: $PFSENSE_DMZ_IP  
+- **Subnet**: 255.255.255.0 (24-bit)
+- **DHCP Range**: 10.0.2.100 - 10.0.2.200
+
+## Initial Setup Steps
+
+1. **Boot from ISO and install pfSense to disk**
+2. **Reboot and remove ISO**
+3. **Console Configuration**:
+   - Assign interfaces: WAN=vtnet0, LAN=vtnet1, OPT1=vtnet2
+   - Configure WAN interface with static IP
+   - Configure LAN interface with $PFSENSE_LAN_IP
+4. **Web Interface Setup**:
+   - Access: https://$PFSENSE_LAN_IP
+   - Login: admin / pfsense
+   - **CHANGE DEFAULT PASSWORD IMMEDIATELY**
+5. **Configure firewall rules and NAT as needed**
+
+## DNS Servers
+- Primary: 8.8.8.8
+- Secondary: 8.8.4.4
+
+## Important Notes
+- Default credentials: admin / pfsense
+- Change the default password during initial setup
+- Configure firewall rules to secure your environment
+- Enable DHCP on LAN/DMZ if needed
 EOF
 
-    log "INFO" "pfSense configuration template created at: $config_dir/config-template.xml"
-    log "INFO" "Note: Default admin password is 'pfsense' - change this immediately after installation"
+    log "INFO" "pfSense setup documentation created at: $config_dir/setup-instructions.md"
+    log "INFO" "Manual configuration required after pfSense installation"
 }
 
 
-# Helper function for netmask to CIDR conversion (simplified)
-netmask_to_cidr_simple() {
-    local netmask="$1"
-    case "$netmask" in
-        "255.255.255.255") echo "32" ;;
-        "255.255.255.254") echo "31" ;;
-        "255.255.255.252") echo "30" ;;
-        "255.255.255.248") echo "29" ;;
-        "255.255.255.240") echo "28" ;;
-        "255.255.255.224") echo "27" ;;
-        "255.255.255.192") echo "26" ;;
-        "255.255.255.128") echo "25" ;;
-        "255.255.255.0") echo "24" ;;
-        "255.255.254.0") echo "23" ;;
-        "255.255.252.0") echo "22" ;;
-        "255.255.248.0") echo "21" ;;
-        "255.255.240.0") echo "20" ;;
-        "255.255.224.0") echo "19" ;;
-        "255.255.192.0") echo "18" ;;
-        "255.255.128.0") echo "17" ;;
-        "255.255.0.0") echo "16" ;;
-        *) echo "24" ;;  # Default fallback
-    esac
-}
 
 # Show VM management commands
 show_management_commands() {
@@ -397,8 +266,8 @@ show_management_commands() {
     echo "Default Login: admin / pfsense"
     echo
     echo "=== Documentation ==="
-    echo "Setup Guide:   docs/pfsense-setup.md"
-    echo "Config Template: config/pfsense/config-template.xml"
+    echo "Setup Guide:   config/pfsense/setup-instructions.md"
+    echo "Manual Config: Required after installation"
     echo
 }
 
@@ -507,8 +376,8 @@ main() {
         log "INFO" "  2. Download pfSense ISO if needed"
         log "INFO" "  3. Create VM with ID $PFSENSE_VM_ID"
         log "INFO" "  4. Configure network interfaces"
-        log "INFO" "  5. Generate configuration templates"
-        log "INFO" "  6. Create setup documentation"
+        log "INFO" "  5. Generate setup documentation"
+        log "INFO" "  6. Create manual configuration guide"
         log "INFO" ""
         log "INFO" "DRY RUN completed - no changes were made"
         log "INFO" "To create the pfSense VM, run without --dry-run flag"
@@ -536,7 +405,7 @@ main() {
     create_pfsense_vm
     
     # Generate configuration files
-    generate_pfsense_config
+    generate_pfsense_documentation
     
     # Show management commands
     show_management_commands
@@ -546,7 +415,12 @@ main() {
     log "INFO" "Next steps:"
     log "INFO" "1. Start the VM: qm start $PFSENSE_VM_ID"
     log "INFO" "2. Access console: qm terminal $PFSENSE_VM_ID"
-    log "INFO" "3. Access web interface: https://$PFSENSE_LAN_IP"
+    log "INFO" "3. Install pfSense to disk and reboot"
+    log "INFO" "4. Configure interfaces through console menu"
+    log "INFO" "5. Access web interface: https://$PFSENSE_LAN_IP"
+    log "INFO" "6. Complete setup using web interface"
+    log "INFO" ""
+    log "INFO" "Configuration guide: config/pfsense/setup-instructions.md"
 }
 
 # Script entry point

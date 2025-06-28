@@ -206,13 +206,23 @@ qm terminal 100
 ```
 
 Follow the pfSense installation wizard:
-1. Install pfSense to disk
-2. Configure network interfaces:
+1. **Install pfSense to disk** (select "Install" from boot menu)
+2. **Reboot and remove ISO** (VM will boot from disk)
+3. **Console interface assignment**:
    - WAN: vtnet0 (connected to vmbr0)
-   - LAN: vtnet1 (connected to vmbr1)
-   - DMZ: vtnet2 (connected to vmbr2)
-3. Set WAN IP to one of your additional IPs
-4. Set LAN IP to 192.168.1.1/24 (or use 10.0.1.1/24)
+   - LAN: vtnet1 (connected to vmbr1) 
+   - DMZ: vtnet2 (connected to vmbr2) - Optional
+4. **Configure WAN interface** (option 2 in console menu):
+   - Use static IP configuration
+   - IP: One of your additional Hetzner IPs
+   - Subnet: Check your Hetzner control panel
+   - Gateway: Your Hetzner gateway IP
+5. **Configure LAN interface** (option 2 in console menu):
+   - IP: 10.0.1.1
+   - Subnet: 24 (255.255.255.0)
+   - Enable DHCP if desired (range: 10.0.1.100-10.0.1.200)
+
+**Important**: pfSense requires manual configuration - there is no automatic setup!
 
 ### 2. Access pfSense Web Interface
 
@@ -226,7 +236,10 @@ pct console 200
 ./pfsense-access.sh
 
 # Or manually open Firefox and navigate to https://10.0.1.1
+# Note: Accept the SSL certificate warning (pfSense uses self-signed certificate)
 ```
+
+**Note:** pfSense generates its own self-signed SSL certificate on first boot. You'll need to accept the browser's security warning when first accessing the web interface.
 
 #### Option B: Traditional Method
 - Connect a VM/container to vmbr1 (LAN network)

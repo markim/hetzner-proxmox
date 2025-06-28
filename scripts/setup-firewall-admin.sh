@@ -280,6 +280,8 @@ main() {
     log "INFO" ""
     log "INFO" "5. Access pfSense admin panel:"
     log "INFO" "   Open web browser in Puppy Linux and navigate to pfSense LAN IP"
+    log "INFO" "   Note: You may need to accept the self-signed SSL certificate warning"
+    log "INFO" "   pfSense generates its own certificate on first boot"
     log "INFO" ""
     log "INFO" "6. Optional: Save session to disk if you want persistent changes"
     log "INFO" "   Puppy Linux can run entirely from RAM for instant startup"
