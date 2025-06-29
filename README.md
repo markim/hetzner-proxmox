@@ -20,7 +20,7 @@ Automated setup scripts for configuring a Hetzner server with Proxmox, pfSense f
 
 3. **Run setup components in order:**
    ```bash
-   # Optional: Optimize drive configuration for multiple drives
+   # Optional: Scan drives and configure RAID arrays (interactive)
    sudo ./install.sh --preparedrives
    
    # Install reverse proxy with HTTPS
@@ -47,16 +47,18 @@ Automated setup scripts for configuring a Hetzner server with Proxmox, pfSense f
 | Command | Description |
 |---------|-------------|
 | `./install.sh --check-mac` | **START HERE** - Verify MAC address configuration |
-| `./install.sh --preparedrives` | Scan and configure optimal RAID setup (optional) |
+| `./install.sh --preparedrives` | Interactive drive and RAID configuration (optional) |
 | `./install.sh --caddy` | Install Caddy reverse proxy with HTTPS |
 | `./install.sh --network` | Configure network bridges for additional IPs |
 | `./install.sh --pfsense` | Create pfSense firewall VM |
 | `./install.sh --firewalladmin` | Create Fedora container for pfSense admin access |
 
 ### Command Options
-- `--dry-run` - Preview changes without executing
+- `--dry-run` - Preview changes without executing (recommended first)
 - `--verbose` - Enable detailed logging
 - `--config FILE` - Use custom environment file
+- `--config auto` - Use recommended RAID configuration automatically
+- `--force` - Skip safety confirmations (use with extreme caution)
 
 ## 🏗️ What This Creates
 
@@ -70,9 +72,11 @@ Internet → Additional IPs → vmbr0 (WAN) → pfSense → vmbr1 (LAN) / vmbr2 
 ### Components
 
 **Drive Preparation** (Optional)
-- Intelligent RAID configuration based on detected hardware
-- Supports any drive combination and sizes
-- Creates backups and emergency restore scripts
+- Interactive drive and RAID configuration with multiple options
+- Safety checks and confirmations before making any changes
+- Supports any drive combination and sizes with user choice
+- Creates backups and emergency restore information
+- Scan-only mode to preview configurations without changes
 
 **Caddy Reverse Proxy**
 - HTTPS termination with automatic Let's Encrypt certificates
@@ -157,6 +161,15 @@ If you prefer to run individual components:
 - **Secure Admin Access**: Dedicated container for firewall management
 - **Network Isolation**: Proper VLAN separation between WAN/LAN/DMZ
 - **SSH Preservation**: Network changes preserve SSH connectivity
+
+## 🛡️ Safety Features
+
+- **Interactive Drive Setup**: User confirms all drive operations with detailed previews
+- **Multiple Safety Checks**: Verifies system state before making destructive changes
+- **Emergency Restore Info**: Creates detailed backup information before any changes
+- **Scan-Only Mode**: Preview drive configurations without making any changes
+- **Force Confirmation**: Requires explicit confirmation for destructive operations
+- **Automatic Rollback**: Network changes include automatic restore capabilities
 
 ## 🐛 Getting Help
 

@@ -1512,3 +1512,451 @@ setup_standard_raid_partitions() {
     # Setup mounts
     setup_raid6_mounts  # Reuse the same mount setup
 }
+
+# Interactive configuration selection
+interactive_config_selection() {
+    log "INFO" "🎯 Drive Configuration Selection"
+    echo
+    
+    # Import the drive group data
+    eval "$DRIVE_GROUPS_STR"
+    eval "$DRIVE_SIZES_STR"
+    
+    # Get available configurations
+    local configs=()
+    local descriptions=()
+    
+    # Always add these basic options
+    configs+=("scan-only")
+    descriptions+=("Scan drives and show recommendations (safe, no changes)")
+    
+    configs+=("no-raid")
+    descriptions+=("Use all drives individually (no redundancy)")
+    
+    # Add RAID options based on detected drives
+    local group_count=${#drive_groups[@]}
+    
+    for category in "${!drive_groups[@]}"; do
+        local drives_in_category=(${drive_groups[$category]})
+        local count=${#drives_in_category[@]}
+        local size_gb=${drive_sizes_gb[$category]}
+        
+        if [[ $count -ge 2 ]]; then
+            configs+=("raid1-${category}")
+            descriptions+=("RAID 1 with ${count}x ${category} drives (~$((size_gb / 2))GB usable)")
+        fi
+        
+        if [[ $count -ge 3 ]]; then
+            configs+=("raid5-${category}")
+            descriptions+=("RAID 5 with ${count}x ${category} drives (~$((size_gb * (count - 1)))GB usable)")
+        fi
+        
+        if [[ $count -ge 4 ]]; then
+            configs+=("raid6-${category}")
+            descriptions+=("RAID 6 with ${count}x ${category} drives (~$((size_gb * (count - 2)))GB usable)")
+            
+            configs+=("raid10-${category}")
+            descriptions+=("RAID 10 with ${count}x ${category} drives (~$((size_gb * count / 2))GB usable)")
+        fi
+    done
+    
+    # Add dual RAID option if exactly 2 groups with 2+ drives each
+    if [[ $group_count -eq 2 ]]; then
+        local can_dual_raid=true
+        for category in "${!drive_groups[@]}"; do
+            local drives_in_category=(${drive_groups[$category]})
+            local count=${#drives_in_category[@]}
+            if [[ $count -lt 2 ]]; then
+                can_dual_raid=false
+                break
+            fi
+        done
+        
+        if [[ "$can_dual_raid" == "true" ]]; then
+            configs+=("dual-raid1")
+            descriptions+=("Dual RAID 1 - separate arrays for each drive size (recommended)")
+        fi
+    fi
+    
+    # Add mixed optimal if 3+ groups
+    if [[ $group_count -ge 3 ]]; then
+        configs+=("mixed-optimal")
+        descriptions+=("Mixed optimal - RAID for matching drives, individual for others")
+    fi
+    
+    # Display options
+    log "INFO" "📋 Available Configuration Options:"
+    echo
+    
+    for i in "${!configs[@]}"; do
+        local num=$((i + 1))
+        printf "  %2d) %-20s %s\n" "$num" "${configs[$i]}" "${descriptions[$i]}"
+    done
+    
+    echo
+    
+    # Show recommendation if available
+    if [[ -n "${RECOMMENDED_CONFIG:-}" ]]; then
+        log "INFO" "💡 Recommended: $RECOMMENDED_CONFIG"
+        echo
+    fi
+    
+    # Get user selection
+    local selection=""
+    while true; do
+        echo -n "Please select a configuration (1-${#configs[@]}) or 'q' to quit: "
+        read -r selection
+        
+        if [[ "$selection" == "q" || "$selection" == "Q" ]]; then
+            log "INFO" "Configuration cancelled by user"
+            exit 0
+        fi
+        
+        if [[ "$selection" =~ ^[0-9]+$ ]] && [[ "$selection" -ge 1 ]] && [[ "$selection" -le "${#configs[@]}" ]]; then
+            local config_index=$((selection - 1))
+            export SELECTED_CONFIG="${configs[$config_index]}"
+            log "INFO" "Selected configuration: $SELECTED_CONFIG"
+            break
+        else
+            echo "Invalid selection. Please enter a number between 1 and ${#configs[@]}, or 'q' to quit."
+        fi
+    done
+    
+    echo
+}
+
+# Confirmation prompt for destructive operations
+confirm_operation() {
+    local config="$1"
+    
+    if [[ "$config" == "scan-only" ]]; then
+        return 0  # No confirmation needed for scan-only
+    fi
+    
+    log "WARNING" "⚠️  DESTRUCTIVE OPERATION WARNING ⚠️"
+    echo
+    log "WARNING" "This operation will:"
+    log "WARNING" "• Wipe ALL data on the selected drives"
+    log "WARNING" "• Create new partition tables"
+    log "WARNING" "• Set up RAID arrays (if selected)"
+    log "WARNING" "• Format filesystems"
+    echo
+    log "WARNING" "🚨 ALL EXISTING DATA ON THESE DRIVES WILL BE PERMANENTLY LOST! 🚨"
+    echo
+    
+    # Show which drives will be affected
+    eval "$DRIVE_GROUPS_STR"
+    log "WARNING" "Drives that will be affected:"
+    for category in "${!drive_groups[@]}"; do
+        local drives_in_category=(${drive_groups[$category]})
+        log "WARNING" "  ${category}: ${drives_in_category[*]}"
+    done
+    
+    echo
+    log "WARNING" "💾 BACKUP RECOMMENDATION:"
+    log "WARNING" "• Ensure you have backups of any important data"
+    log "WARNING" "• Verify you can reinstall the OS if needed"
+    log "WARNING" "• Test this in a development environment first"
+    echo
+    
+    # Force user to type confirmation
+    local confirmation=""
+    while true; do
+        echo -n "Type 'I UNDERSTAND THE RISKS' (exactly) to proceed, or 'cancel' to abort: "
+        read -r confirmation
+        
+        if [[ "$confirmation" == "I UNDERSTAND THE RISKS" ]]; then
+            log "INFO" "User confirmed understanding of risks. Proceeding..."
+            break
+        elif [[ "$confirmation" == "cancel" ]]; then
+            log "INFO" "Operation cancelled by user"
+            exit 0
+        else
+            echo "Please type exactly 'I UNDERSTAND THE RISKS' or 'cancel'"
+        fi
+    done
+    
+    echo
+}
+
+# System safety checks
+perform_safety_checks() {
+    log "INFO" "🔍 Performing system safety checks..."
+    
+    # Check if we're running on Proxmox
+    if [[ ! -f "/etc/pve" ]] && [[ ! -d "/etc/pve" ]]; then
+        log "WARNING" "This doesn't appear to be a Proxmox system"
+        log "WARNING" "Are you sure you want to continue? (y/N): "
+        read -r response
+        if [[ ! "$response" =~ ^[yY]$ ]]; then
+            log "INFO" "Aborted by user"
+            exit 0
+        fi
+    fi
+    
+    # Check for active VMs or containers
+    if command -v qm >/dev/null 2>&1; then
+        local running_vms=$(qm list 2>/dev/null | grep -c "running" || echo "0")
+        if [[ "$running_vms" -gt 0 ]]; then
+            log "WARNING" "Found $running_vms running VMs"
+            log "WARNING" "Drive reconfiguration may affect VM storage"
+            log "WARNING" "Recommend stopping VMs first. Continue anyway? (y/N): "
+            read -r response
+            if [[ ! "$response" =~ ^[yY]$ ]]; then
+                log "INFO" "Aborted by user"
+                exit 0
+            fi
+        fi
+    fi
+    
+    # Check available space for backups
+    local root_space=$(df / | awk 'NR==2 {print $4}')
+    if [[ "$root_space" -lt 1048576 ]]; then  # Less than 1GB
+        log "WARNING" "Low disk space on root filesystem ($(($root_space / 1024))MB available)"
+        log "WARNING" "May not have enough space for emergency backups"
+    fi
+    
+    # Check if any of the target drives are currently mounted
+    eval "$DRIVE_GROUPS_STR"
+    local mounted_drives=()
+    for category in "${!drive_groups[@]}"; do
+        local drives_in_category=(${drive_groups[$category]})
+        for drive in "${drives_in_category[@]}"; do
+            if mount | grep -q "^$drive"; then
+                mounted_drives+=("$drive")
+            fi
+        done
+    done
+    
+    if [[ ${#mounted_drives[@]} -gt 0 ]]; then
+        log "WARNING" "Some target drives are currently mounted:"
+        for drive in "${mounted_drives[@]}"; do
+            log "WARNING" "  $drive"
+        done
+        log "WARNING" "These will be unmounted before proceeding. Continue? (y/N): "
+        read -r response
+        if [[ ! "$response" =~ ^[yY]$ ]]; then
+            log "INFO" "Aborted by user"
+            exit 0
+        fi
+    fi
+    
+    log "INFO" "✅ Safety checks completed"
+    echo
+}
+
+# Create emergency restore information
+create_emergency_info() {
+    log "INFO" "📝 Creating emergency restore information..."
+    
+    local backup_dir="/root/drive-backup-$(date +%Y%m%d-%H%M%S)"
+    mkdir -p "$backup_dir"
+    
+    # Save current drive information
+    {
+        echo "# Emergency Drive Restoration Information"
+        echo "# Created: $(date)"
+        echo "# Original system state before drive reconfiguration"
+        echo ""
+        echo "# Current partition table dumps:"
+        
+        eval "$DRIVE_GROUPS_STR"
+        for category in "${!drive_groups[@]}"; do
+            local drives_in_category=(${drive_groups[$category]})
+            for drive in "${drives_in_category[@]}"; do
+                echo ""
+                echo "## Drive: $drive"
+                echo "### Partition table:"
+                sfdisk -d "$drive" 2>/dev/null || echo "# Failed to dump partition table"
+                echo "### Block device info:"
+                lsblk "$drive" 2>/dev/null || echo "# Failed to get block info"
+            done
+        done
+        
+        echo ""
+        echo "# Current /etc/fstab:"
+        cat /etc/fstab
+        
+        echo ""
+        echo "# Current mount points:"
+        mount
+        
+        echo ""
+        echo "# Current RAID status:"
+        cat /proc/mdstat 2>/dev/null || echo "# No RAID devices"
+        
+        echo ""
+        echo "# Current LVM status:"
+        pvs 2>/dev/null || echo "# No LVM physical volumes"
+        vgs 2>/dev/null || echo "# No LVM volume groups"
+        lvs 2>/dev/null || echo "# No LVM logical volumes"
+        
+    } > "$backup_dir/system-state.txt"
+    
+    # Create restore script template
+    cat > "$backup_dir/restore-instructions.txt" << 'EOF'
+# EMERGENCY RESTORE INSTRUCTIONS
+
+⚠️  WARNING: Only use this if the drive configuration failed and you need to restore access
+
+## Option 1: Restore from Hetzner Rescue System
+1. Boot into Hetzner rescue system
+2. Use Hetzner installimage to reinstall the OS
+3. Restore your data from backups
+
+## Option 2: Manual restoration (if system is still bootable)
+1. Check system-state.txt for original configuration
+2. Use sfdisk to restore partition tables:
+   sfdisk /dev/sdX < partition-backup.sfdisk
+3. Restore /etc/fstab from the backup
+4. Reboot and verify
+
+## Option 3: Contact Support
+If you're unsure, contact your system administrator or hosting provider support.
+
+## Important Notes:
+- This drive configuration was created by hetzner-proxmox setup scripts
+- Original system state is preserved in system-state.txt
+- Consider reinstalling from scratch if restoration seems complex
+EOF
+    
+    log "INFO" "Emergency restore information saved to: $backup_dir"
+    export BACKUP_DIR="$backup_dir"
+}
+
+# Main execution function
+main() {
+    # Set error handler
+    trap 'error_handler ${LINENO} $?' ERR
+    
+    # Parse command line arguments
+    parse_args "$@"
+    
+    # Show usage if no arguments and not in cleanup mode
+    if [[ -z "${RAID_CONFIG:-}" ]] && [[ "${DRY_RUN:-false}" == "false" ]] && [[ "${CLEANUP_ONLY:-false}" == "false" ]]; then
+        usage
+        exit 0
+    fi
+    
+    # Handle cleanup mode
+    if [[ "${CLEANUP_ONLY:-false}" == "true" ]]; then
+        log "INFO" "Cleanup mode - removing existing RAID arrays"
+        # Add cleanup logic here if needed
+        exit 0
+    fi
+    
+    log "INFO" "🚀 Starting Hetzner Proxmox Drive Preparation"
+    log "INFO" "$(date)"
+    echo
+    
+    # Detect and analyze drives
+    log "INFO" "🔍 Detecting available drives..."
+    local drives
+    drives=($(detect_drives))
+    
+    if [[ ${#drives[@]} -eq 0 ]]; then
+        log "ERROR" "No suitable drives found"
+        exit 1
+    fi
+    
+    log "INFO" "Analyzing drive configuration..."
+    analyze_drives "${drives[@]}"
+    
+    # Suggest best configuration
+
+    suggest_best_config
+    
+    # If a specific config was provided, use it; otherwise prompt user
+    if [[ -n "${RAID_CONFIG:-}" ]]; then
+        if [[ "$RAID_CONFIG" == "auto" ]] || [[ "$RAID_CONFIG" == "recommended" ]]; then
+            export SELECTED_CONFIG="${RECOMMENDED_CONFIG:-no-raid}"
+            log "INFO" "Using recommended configuration: $SELECTED_CONFIG"
+        else
+            export SELECTED_CONFIG="$RAID_CONFIG"
+            log "INFO" "Using specified configuration: $SELECTED_CONFIG"
+        fi
+    else
+        # Interactive mode - let user choose
+        interactive_config_selection
+    fi
+    
+    # Validate the configuration
+    if ! validate_raid_config "$SELECTED_CONFIG"; then
+        log "ERROR" "Invalid RAID configuration: $SELECTED_CONFIG"
+        exit 1
+    fi
+    
+    # Preview the configuration
+    echo
+    log "INFO" "🎯 Configuration Preview"
+    log "INFO" "Selected configuration: $SELECTED_CONFIG"
+    echo
+    
+    preview_raid_config "$SELECTED_CONFIG"
+    echo
+    
+    # Handle dry-run mode
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        log "INFO" "🏃 DRY RUN MODE - No changes will be made"
+        log "INFO" ""
+        log "INFO" "To execute this configuration for real:"
+        if [[ -n "${RAID_CONFIG:-}" ]]; then
+            log "INFO" "  $0 --config \"$SELECTED_CONFIG\""
+        else
+            log "INFO" "  $0 --config \"$SELECTED_CONFIG\""
+        fi
+        log "INFO" ""
+        log "INFO" "Add --force to skip confirmations (use with caution)"
+        exit 0
+    fi
+    
+    # Handle scan-only mode
+    if [[ "$SELECTED_CONFIG" == "scan-only" ]]; then
+        log "INFO" "✅ Scan completed. No changes made."
+        log "INFO" ""
+        log "INFO" "To apply a configuration, run:"
+        log "INFO" "  $0 --config <configuration-name>"
+        exit 0
+    fi
+    
+    # Safety checks and confirmations for destructive operations
+    if [[ "${FORCE:-false}" != "true" ]]; then
+        perform_safety_checks
+        confirm_operation "$SELECTED_CONFIG"
+    fi
+    
+    # Create emergency restore information
+    create_emergency_info
+    
+    # Execute the configuration
+    log "INFO" "🔧 Executing drive configuration: $SELECTED_CONFIG"
+    log "INFO" "This may take several minutes..."
+    echo
+    
+    if ! execute_raid_config "$SELECTED_CONFIG"; then
+        log "ERROR" "Drive configuration failed"
+        log "ERROR" "Emergency restore information available at: ${BACKUP_DIR:-/root/drive-backup-*}"
+        exit 1
+    fi
+    
+    # Update system configuration
+    update_system_config "$SELECTED_CONFIG"
+    
+    log "INFO" "✅ Drive preparation completed successfully!"
+    echo
+    log "INFO" "📊 Summary:"
+    log "INFO" "  Configuration: $SELECTED_CONFIG"
+    log "INFO" "  Backup info: ${BACKUP_DIR:-/root/drive-backup-*}"
+    log "INFO" "  Status: All operations completed"
+    echo
+    log "INFO" "🔄 Next Steps:"
+    log "INFO" "1. Monitor RAID sync (if applicable): watch cat /proc/mdstat"
+    log "INFO" "2. Reboot to verify configuration: reboot"
+    log "INFO" "3. Configure Proxmox storage pools in web interface"
+    log "INFO" "4. Continue with network setup: ./install.sh --network"
+}
+
+# Run main function if script is executed directly
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi
