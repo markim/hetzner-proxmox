@@ -61,21 +61,39 @@ EOF
 detect_system_drive() {
     log "INFO" "Detecting system drive..."
     
-    # Find drives with mounted partitions
+    # Find all devices with mounted partitions or swap
     local system_drives=()
-    while IFS= read -r line; do
-        if [[ -n "$line" ]]; then
-            system_drives+=("$line")
-        fi
-    done < <(lsblk -ndo NAME,MOUNTPOINT | awk '$2 != "" {print "/dev/" $1}' | sed 's/[0-9]*$//' | sort -u)
     
-    if [[ ${#system_drives[@]} -eq 0 ]]; then
+    # Get all mounted block devices (including LVM, partitions, etc.)
+    while IFS= read -r device; do
+        if [[ -n "$device" ]]; then
+            # Extract the base device name (remove partition numbers and LVM)
+            local base_device
+            base_device=$(echo "$device" | sed 's|/dev/||' | sed 's/[0-9]*$//' | sed 's/-.*$//')
+            system_drives+=("/dev/$base_device")
+        fi
+    done < <(lsblk -nlo NAME,MOUNTPOINTS | awk '$2 != "" {print "/dev/" $1}')
+    
+    # Also check for swap devices
+    while IFS= read -r device; do
+        if [[ -n "$device" ]]; then
+            local base_device
+            base_device=$(echo "$device" | sed 's|/dev/||' | sed 's/[0-9]*$//' | sed 's/-.*$//')
+            system_drives+=("/dev/$base_device")
+        fi
+    done < <(lsblk -nlo NAME,FSTYPE | awk '$2 == "swap" {print "/dev/" $1}')
+    
+    # Remove duplicates and sort
+    local unique_drives
+    mapfile -t unique_drives < <(printf '%s\n' "${system_drives[@]}" | sort -u)
+    
+    if [[ ${#unique_drives[@]} -eq 0 ]]; then
         log "ERROR" "No system drive detected"
         exit 1
     fi
     
-    log "INFO" "System drives detected: ${system_drives[*]}"
-    printf '%s\n' "${system_drives[@]}"
+    log "INFO" "System drives detected: ${unique_drives[*]}"
+    printf '%s\n' "${unique_drives[@]}"
 }
 
 # Get all block devices
@@ -199,10 +217,29 @@ format_drive() {
 main() {
     log "INFO" "Starting drive formatting process..."
     
-    # Get non-system drives
+    # Show current drive layout
+    log "INFO" "Current drive layout:"
+    lsblk -o NAME,SIZE,TYPE,MOUNTPOINTS,FSTYPE,MODEL
+    echo
+    
+    # Get system and non-system drives
+    local system_drives
+    mapfile -t system_drives < <(detect_system_drive)
+    
     local non_system_drives
     mapfile -t non_system_drives < <(get_non_system_drives)
     
+    # Show what we detected
+    log "INFO" "Drive classification:"
+    log "INFO" "System drives (will NOT be touched):"
+    for drive in "${system_drives[@]}"; do
+        local size model
+        size=$(lsblk -ndo SIZE "$drive" 2>/dev/null || echo "Unknown")
+        model=$(lsblk -ndo MODEL "$drive" 2>/dev/null || echo "Unknown")
+        log "INFO" "  🛡️  $drive ($size) - $model [PROTECTED]"
+    done
+    
+    echo
     if [[ ${#non_system_drives[@]} -eq 0 ]]; then
         log "INFO" "No non-system drives found to format"
         return 0
@@ -215,6 +252,7 @@ main() {
         model=$(lsblk -ndo MODEL "$drive" 2>/dev/null || echo "Unknown")
         log "INFO" "  📀 $drive ($size) - $model"
     done
+    echo
     
     if [[ "$DRY_RUN" == "false" ]]; then
         log "WARN" "⚠️  WARNING: This will permanently destroy all data on the above drives!"
