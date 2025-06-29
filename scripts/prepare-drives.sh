@@ -122,8 +122,16 @@ cmd_list() {
     echo
     
     log "INFO" "Available drives for new RAID:"
-    if ! detect_drives; then
+    if ! detect_drives >/dev/null 2>&1; then
         log "INFO" "💡 All drives appear to be in use or partitioned"
+    else
+        detect_drives | while IFS= read -r drive_info; do
+            local drive size model status
+            drive=$(echo "$drive_info" | cut -d: -f1)
+            size=$(echo "$drive_info" | cut -d: -f2)
+            model=$(echo "$drive_info" | cut -d: -f3-)
+            log "INFO" "  Found: $drive ($size) - $model"
+        done
     fi
 }
 
@@ -349,8 +357,6 @@ cmd_create() {
 
 # Detect available drives
 detect_drives() {
-    log "INFO" "Scanning for available drives..."
-    
     # Get all block devices that are disks (not partitions)
     local drives=()
     while IFS= read -r line; do
@@ -379,12 +385,9 @@ detect_drives() {
         fi
         
         drives+=("$drive:$size:$model$status")
-        log "INFO" "  Found: $drive ($size) - $model$status"
     done < <(lsblk -dn -o NAME,SIZE,TYPE,MODEL 2>/dev/null || true)
     
     if [[ ${#drives[@]} -eq 0 ]]; then
-        log "WARNING" "No suitable drives found for new RAID arrays"
-        log "INFO" "All drives appear to be in use or partitioned"
         return 1
     fi
     
@@ -433,6 +436,7 @@ interactive_create_raid() {
     log "INFO" "=== Create New RAID Array ==="
     
     # Check for available drives
+    log "INFO" "Scanning for available drives..."
     local available_drives=()
     while IFS= read -r drive_info; do
         local drive
@@ -468,7 +472,7 @@ interactive_create_raid() {
     raid_level=$(get_raid_level)
     
     # Determine minimum drives required
-    local min_drives
+    local min_drives=2
     case "$raid_level" in
         "0"|"1"|"linear") min_drives=2 ;;
         "5") min_drives=3 ;;
@@ -754,11 +758,19 @@ main_menu() {
                 lsblk -o NAME,SIZE,TYPE,MOUNTPOINT,FSTYPE,MODEL 2>/dev/null || echo "lsblk not available"
                 echo
                 echo "Available drives for RAID:"
-                if ! detect_drives; then
+                if ! detect_drives >/dev/null 2>&1; then
                     log "INFO" "💡 Tips for RAID setup:"
                     log "INFO" "  • Drives with existing partitions/data cannot be used for new RAID"
                     log "INFO" "  • To reuse drives, you would need to wipe them first (DESTROYS DATA)"
                     log "INFO" "  • Consider adding new drives for RAID arrays"
+                else
+                    detect_drives | while IFS= read -r drive_info; do
+                        local drive size model
+                        drive=$(echo "$drive_info" | cut -d: -f1)
+                        size=$(echo "$drive_info" | cut -d: -f2)
+                        model=$(echo "$drive_info" | cut -d: -f3-)
+                        log "INFO" "  Found: $drive ($size) - $model"
+                    done
                 fi
                 ;;
             5)
