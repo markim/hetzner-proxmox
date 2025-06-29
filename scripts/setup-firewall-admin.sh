@@ -275,7 +275,7 @@ main() {
     log "INFO" "3. Boot Puppy Linux from the ISO (no installation required - runs from RAM)"
     log "INFO" ""
     log "INFO" "4. Configure network interfaces in Puppy Linux:"
-    log "INFO" "   - LAN Interface: Connect to pfSense network (10.0.1.x/24)"
+    log "INFO" "   - LAN Interface: Connect to pfSense network (192.168.1.x/24)"
     log "INFO" "   - WAN Interface: Use public IP ${ADDITIONAL_IPS_ARRAY[1]:-'(configure in .env)'}"
     log "INFO" ""
     log "INFO" "5. Access pfSense admin panel:"

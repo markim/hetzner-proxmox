@@ -22,7 +22,7 @@ readonly PFSENSE_CPU_CORES="${PFSENSE_CPU_CORES:-2}"
 readonly PFSENSE_MEMORY="${PFSENSE_MEMORY:-2048}"
 readonly PFSENSE_DISK_SIZE="${PFSENSE_DISK_SIZE:-8}"
 PFSENSE_WAN_IP="${PFSENSE_WAN_IP:-}"
-readonly PFSENSE_LAN_IP="${PFSENSE_LAN_IP:-10.0.1.1}"
+readonly PFSENSE_LAN_IP="${PFSENSE_LAN_IP:-192.168.1.1}"
 readonly PFSENSE_DMZ_IP="${PFSENSE_DMZ_IP:-10.0.2.1}"
 
 # Validate prerequisites
@@ -183,7 +183,7 @@ create_pfsense_vm() {
     log "INFO" "  - CPU Cores: $PFSENSE_CPU_CORES"
     log "INFO" "  - Disk: $PFSENSE_DISK_SIZE"
     log "INFO" "  - WAN Interface: vmbr0 (connects to $PFSENSE_WAN_IP)"
-    log "INFO" "  - LAN Interface: vmbr1 (10.0.1.0/24)"
+    log "INFO" "  - LAN Interface: vmbr1 (192.168.1.0/24)"
     log "INFO" "  - DMZ Interface: vmbr2 (10.0.2.0/24)"
 }
 
@@ -210,7 +210,7 @@ After pfSense installation, you'll need to configure it manually through the con
 ### LAN Interface (vtnet1) 
 - **IP Address**: $PFSENSE_LAN_IP
 - **Subnet**: 255.255.255.0 (24-bit)
-- **DHCP Range**: 10.0.1.100 - 10.0.1.200
+- **DHCP Range**: 192.168.1.100 - 192.168.1.200
 
 ### DMZ Interface (vtnet2) - Optional
 - **IP Address**: $PFSENSE_DMZ_IP  

@@ -4,12 +4,13 @@ This guide walks you through the complete setup process for a Hetzner Proxmox se
 
 ## Overview
 
-The setup consists of four main phases:
+The setup consists of five main phases:
 
-1. **Caddy Setup** - Reverse proxy and SSL termination
-2. **Network Configuration** - Bridge configuration for pfSense integration  
-3. **pfSense Setup** - Firewall VM creation and configuration
-4. **Firewall Admin Container** - Secure administrative access to pfSense
+1. **Drive Preparation** (Optional) - Intelligent RAID configuration based on detected drives
+2. **Caddy Setup** - Reverse proxy and SSL termination
+3. **Network Configuration** - Bridge configuration for pfSense integration  
+4. **pfSense Setup** - Firewall VM creation and configuration
+5. **Firewall Admin Container** - Secure administrative access to pfSense
 
 ## Prerequisites
 
@@ -17,6 +18,36 @@ The setup consists of four main phases:
 - Additional IP addresses allocated from Hetzner
 - Root access to the server
 - SSH connection to the server
+
+## Phase 0: Drive Preparation (Optional)
+
+If your server has multiple drives, the script can scan them and configure an optimal RAID setup.
+
+**⚠️ Important**: This step should be done AFTER installing Proxmox via Hetzner's installimage but BEFORE setting up VMs or containers.
+
+```bash
+# Scan your system to see what drives are available
+sudo ./install.sh --preparedrives
+
+# The script will show you:
+# - All drives detected in your system
+# - Intelligent grouping by size
+# - Recommended RAID configurations for YOUR specific hardware
+
+# Preview the recommended configuration
+sudo ./install.sh --preparedrives --config <recommended> --dry-run
+
+# Apply the optimal configuration for your drives
+sudo ./install.sh --preparedrives --config <recommended>
+```
+
+**Why scan first?**
+- No assumptions about your hardware
+- Works with any drive sizes and combinations  
+- Provides recommendations based on what it actually finds
+- Shows you exactly what capacity and redundancy you'll get
+
+For detailed information, see: [Drive Preparation Guide](drive-preparation.md)
 
 ## Phase 1: Caddy Setup
 
@@ -85,7 +116,7 @@ ADDITIONAL_NETMASK_2=255.255.255.192
 
 **What this creates:**
 - `vmbr0`: WAN bridge connected to your physical interface with additional IPs
-- `vmbr1`: LAN bridge (10.0.1.0/24) for internal VMs/containers
+- `vmbr1`: LAN bridge (192.168.1.0/24) for internal VMs/containers
 - `vmbr2`: DMZ bridge (10.0.2.0/24) for exposed services
 
 ## Phase 3: pfSense Setup
@@ -137,7 +168,7 @@ FIREWALL_ADMIN_MEMORY=1024
 FIREWALL_ADMIN_CORES=1
 FIREWALL_ADMIN_DISK_SIZE=8
 FIREWALL_ADMIN_WAN_IP=203.0.113.11  # Will auto-select second additional IP if not set
-FIREWALL_ADMIN_LAN_IP=10.0.1.10      # IP on LAN network for pfSense access
+FIREWALL_ADMIN_LAN_IP=192.168.1.10      # IP on LAN network for pfSense access
 ```
 
 ### Create Firewall Admin Container
@@ -159,7 +190,7 @@ FIREWALL_ADMIN_LAN_IP=10.0.1.10      # IP on LAN network for pfSense access
 - Quick access scripts for pfSense management
 
 **Container features:**
-- **LAN Interface**: Access to pfSense web interface (10.0.1.0/24 network)
+- **LAN Interface**: Access to pfSense web interface (192.168.1.0/24 network)
 - **WAN Interface**: Internet access for updates and external tools
 - **Desktop Environment**: Full Fedora 42 Workstation for GUI access
 - **Security Tools**: Pre-installed network and security tools
@@ -180,7 +211,7 @@ pfSense VM          Firewall Admin Container
 (Firewall)          (WAN: .140 for internet)
     ↓                    ↓
 vmbr1 (LAN)         vmbr1 (LAN)
-10.0.1.0/24         10.0.1.10 (pfSense access)
+192.168.1.0/24         192.168.1.10 (pfSense access)
     ↓                    
 Internal VMs        
 Containers          
@@ -218,9 +249,9 @@ Follow the pfSense installation wizard:
    - Subnet: Check your Hetzner control panel
    - Gateway: Your Hetzner gateway IP
 5. **Configure LAN interface** (option 2 in console menu):
-   - IP: 10.0.1.1
+   - IP: 192.168.1.1
    - Subnet: 24 (255.255.255.0)
-   - Enable DHCP if desired (range: 10.0.1.100-10.0.1.200)
+   - Enable DHCP if desired (range: 192.168.1.100-192.168.1.200)
 
 **Important**: pfSense requires manual configuration - there is no automatic setup!
 
@@ -235,7 +266,7 @@ pct console 200
 # Run the quick access script
 ./pfsense-access.sh
 
-# Or manually open Firefox and navigate to https://10.0.1.1
+# Or manually open Firefox and navigate to https://192.168.1.1
 # Note: Accept the SSL certificate warning (pfSense uses self-signed certificate)
 ```
 
@@ -243,7 +274,7 @@ pct console 200
 
 #### Option B: Traditional Method
 - Connect a VM/container to vmbr1 (LAN network)
-- Access: `https://10.0.1.1` (or configured LAN IP)
+- Access: `https://192.168.1.1` (or configured LAN IP)
 - Default login: `admin` / `pfsense`
 - **CHANGE THE DEFAULT PASSWORD IMMEDIATELY**
 
@@ -260,7 +291,7 @@ pct status 200
 pct console 200
 
 # Check network connectivity from within container
-ping 10.0.1.1    # pfSense LAN IP
+ping 192.168.1.1    # pfSense LAN IP
 ping 8.8.8.8     # Internet connectivity
 ```
 
@@ -279,8 +310,8 @@ Create containers and VMs on appropriate networks:
 #### For Internal Services (LAN)
 ```bash
 # Connect to vmbr1 (LAN bridge)
-# IP range: 10.0.1.0/24
-# Gateway: 10.0.1.1 (pfSense LAN IP)
+# IP range: 192.168.1.0/24
+# Gateway: 192.168.1.1 (pfSense LAN IP)
 ```
 
 #### For Exposed Services (DMZ)
@@ -300,7 +331,7 @@ Create containers and VMs on appropriate networks:
 
 ### Database Server in LAN
 1. Create VM/container on vmbr1 (LAN)
-2. Assign static IP (e.g., 10.0.1.20)
+2. Assign static IP (e.g., 192.168.1.20)
 3. Configure pfSense rules for database access
 4. No direct internet access (secured)
 
@@ -315,7 +346,7 @@ ip link show vmbr0 vmbr1 vmbr2
 ip addr show vmbr1
 
 # Test connectivity
-ping 10.0.1.1  # pfSense LAN IP
+ping 192.168.1.1  # pfSense LAN IP
 ```
 
 ### pfSense Issues

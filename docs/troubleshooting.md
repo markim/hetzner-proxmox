@@ -70,7 +70,7 @@ tail -f /var/log/caddy/access.log
 ### 2.1. pfSense SSL Certificate Issues
 
 **Symptoms:**
-- Browser shows "SSL connection error" when accessing pfSense at 10.0.1.1
+- Browser shows "SSL connection error" when accessing pfSense at 192.168.1.1
 - "Certificate not trusted" or "Invalid certificate" errors
 - Cannot access pfSense web interface from Puppy Linux
 
@@ -85,8 +85,8 @@ Accept the self-signed certificate:
 Verify pfSense is running and accessible:
 ```bash
 # From Proxmox host or Puppy Linux VM
-ping 10.0.1.1
-curl -k https://10.0.1.1  # -k flag ignores SSL certificate issues
+ping 192.168.1.1
+curl -k https://192.168.1.1  # -k flag ignores SSL certificate issues
 ```
 
 Check if pfSense VM is running:

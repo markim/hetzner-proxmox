@@ -22,16 +22,19 @@ Automated setup scripts for configuring a Hetzner server with Proxmox, including
    # 0. IMPORTANT: Check MAC address configuration first
    sudo ./install.sh --check-mac
    
-   # 1. Install Caddy reverse proxy
+   # 1. OPTIONAL: Prepare drives with optimal RAID configuration
+   sudo ./install.sh --preparedrives
+   
+   # 2. Install Caddy reverse proxy
    sudo ./install.sh --caddy
    
-   # 2. Configure network for pfSense integration  
+   # 3. Configure network for pfSense integration  
    sudo ./install.sh --network
    
-   # 3. Create pfSense firewall VM
+   # 4. Create pfSense firewall VM
    sudo ./install.sh --pfsense
    
-   # 4. Create firewall admin container
+   # 5. Create firewall admin container
    sudo ./install.sh --firewalladmin
    ```
 
@@ -45,6 +48,7 @@ This guide covers the entire process from start to finish, including network arc
 
 - `./install.sh` - Show available commands and help
 - `./install.sh --check-mac` - Verify MAC address configuration for additional IPs (RECOMMENDED FIRST)
+- `./install.sh --a` - Scan drives and configure optimal RAID arrays (OPTIONAL - after installimage)
 - `./install.sh --network` - Configure network bridges for pfSense integration
 - `./install.sh --caddy` - Install and configure Caddy with HTTPS
 - `./install.sh --pfsense` - Create and configure pfSense firewall VM
@@ -61,10 +65,11 @@ This guide covers the entire process from start to finish, including network arc
 ## What This Does
 
 ### Complete Infrastructure Setup
-1. **Caddy Installation** - Reverse proxy with automatic SSL certificates
-2. **Network Configuration** - Bridge setup for pfSense integration with additional IPs
-3. **pfSense Setup** - Firewall VM creation with proper network interfaces
-4. **Firewall Admin Container** - Fedora container for secure pfSense administration
+1. **Drive Preparation** (Optional) - Intelligent RAID configuration based on detected drives
+2. **Caddy Installation** - Reverse proxy with automatic SSL certificates
+3. **Network Configuration** - Bridge setup for pfSense integration with additional IPs
+4. **pfSense Setup** - Firewall VM creation with proper network interfaces
+5. **Firewall Admin Container** - Fedora container for secure pfSense administration
 
 ### Network Architecture
 ```
@@ -72,9 +77,18 @@ Internet → Additional IPs → vmbr0 (WAN) → pfSense → vmbr1 (LAN) / vmbr2 
                                               ↓
                                         VMs/Containers
 ```
+- Scans and optimally configures drives for RAID (if multiple drives available)
 - Creates automatic backups and emergency restore scripts
 - Prepares network for pfSense firewall integration
 - Sets up container bridges for Proxmox
+
+### Drive Preparation (`--preparedrives`)
+- Automatically scans all available drives in your system
+- Groups drives by size and analyzes possible RAID configurations
+- Suggests optimal RAID setup based on detected hardware
+- Supports any drive sizes and combinations (no hardcoded assumptions)
+- Preview mode to safely show changes before applying
+- Works with Hetzner's installimage workflow
 
 ### Caddy Setup (`--caddy`)
 - Installs and configures Caddy web server
@@ -97,6 +111,7 @@ Internet → Additional IPs → vmbr0 (WAN) → pfSense → vmbr1 (LAN) / vmbr2 
 - Domain name pointing to your server's IP (for Caddy setup)
 - Additional IP addresses from Hetzner (for network setup)
 - Root access to the server
+- Any combination of drives (the script will scan and adapt to your hardware)
 
 ## Configuration
 

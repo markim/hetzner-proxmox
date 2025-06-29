@@ -11,7 +11,7 @@ The firewall admin container is a Fedora 42-based LXC container designed to prov
 - **Fedora 42 Workstation** with desktop environment
 - **Firefox Browser** for accessing pfSense web interface
 - **Dual Network Interfaces**:
-  - LAN interface for pfSense admin access (10.0.1.0/24)
+  - LAN interface for pfSense admin access (192.168.1.0/24)
   - WAN interface for internet access (using additional Hetzner IP)
 - **Network Tools** for troubleshooting and monitoring
 - **Secure Access** with dedicated admin user
@@ -80,8 +80,8 @@ FIREWALL_ADMIN_DISK_SIZE=8
 
 # Network Configuration
 FIREWALL_ADMIN_WAN_IP=203.0.113.12  # Second additional IP
-FIREWALL_ADMIN_LAN_IP=10.0.1.10      # LAN network IP
-PFSENSE_LAN_IP=10.0.1.1               # pfSense LAN gateway
+FIREWALL_ADMIN_LAN_IP=192.168.1.10      # LAN network IP
+PFSENSE_LAN_IP=192.168.1.1               # pfSense LAN gateway
 ```
 
 ### Network Configuration
@@ -89,8 +89,8 @@ PFSENSE_LAN_IP=10.0.1.1               # pfSense LAN gateway
 The container is configured with dual network interfaces:
 
 - **eth0 (LAN)**: Connected to vmbr1 bridge
-  - IP: 10.0.1.10/24
-  - Gateway: 10.0.1.1 (pfSense LAN IP)
+  - IP: 192.168.1.10/24
+  - Gateway: 192.168.1.1 (pfSense LAN IP)
   - Purpose: Access pfSense web interface and internal services
 
 - **eth1 (WAN)**: Connected to vmbr0 bridge
@@ -133,7 +133,7 @@ pct console 200
 #### SSH Access (if configured)
 ```bash
 # SSH to LAN IP
-ssh admin@10.0.1.10
+ssh admin@192.168.1.10
 ```
 
 #### VNC/Desktop Access
@@ -157,7 +157,7 @@ This script will:
 
 #### Manual Access
 1. Open Firefox within the container
-2. Navigate to `https://10.0.1.1`
+2. Navigate to `https://192.168.1.1`
 3. Login with pfSense credentials (default: admin/pfsense)
 
 ### Network Testing
@@ -165,8 +165,8 @@ This script will:
 #### Test pfSense Connectivity
 ```bash
 # From within container
-ping 10.0.1.1
-curl -k https://10.0.1.1
+ping 192.168.1.1
+curl -k https://192.168.1.1
 ```
 
 #### Test Internet Connectivity
@@ -188,7 +188,7 @@ ip route show
 nmtui
 
 # Check which interface is used for specific destinations
-ip route get 10.0.1.1    # Should use LAN interface
+ip route get 192.168.1.1    # Should use LAN interface
 ip route get 8.8.8.8     # Should use WAN interface
 ```
 
@@ -238,7 +238,7 @@ ip link show vmbr0 vmbr1
 pct config 200 | grep net
 
 # Test from Proxmox host
-ping 10.0.1.10  # Container LAN IP
+ping 192.168.1.10  # Container LAN IP
 ```
 
 ### pfSense Access Issues
@@ -250,7 +250,7 @@ qm status 100
 qm config 100 | grep net
 
 # Test pfSense connectivity
-ping 10.0.1.1
+ping 192.168.1.1
 ```
 
 ### DNS Resolution Issues

@@ -23,6 +23,7 @@ Automated setup for Hetzner Proxmox server with Caddy reverse proxy and HTTPS.
 
 COMMANDS:
     (no command)        Show this help and available commands
+    --preparedrives     Scan drives and configure optimal RAID arrays
     --caddy             Install and configure Caddy with HTTPS (current functionality)
     --network           Configure network interfaces for additional Hetzner IPs
     --pfsense           Create and configure pfSense firewall VM (requires --network first)
@@ -37,11 +38,13 @@ OPTIONS:
     -v, --verbose       Enable verbose logging
 
 EXAMPLES:
-    $0                  # Show available commands
-    $0 --caddy          # Install Caddy with current configuration
-    $0 --network        # Configure network interfaces for additional IPs
-    $0 --pfsense        # Create pfSense VM after network configuration
-    $0 --firewalladmin  # Create firewall admin container after pfSense setup
+    $0                          # Show available commands
+    $0 --preparedrives          # Scan drives and show optimal RAID configurations
+    $0 --preparedrives --config <detected> --dry-run   # Preview setup for your drives
+    $0 --caddy                  # Install Caddy with current configuration
+    $0 --network                # Configure network interfaces for additional IPs
+    $0 --pfsense                # Create pfSense VM after network configuration
+    $0 --firewalladmin          # Create firewall admin container after pfSense setup
     $0 --caddy -c prod.env      # Use custom environment file
     $0 --network --dry-run      # Show network changes without executing
 
@@ -74,6 +77,10 @@ parse_args() {
     # Parse command first
     if [[ $# -gt 0 ]] && [[ "$1" =~ ^--.* ]]; then
         case $1 in
+            --preparedrives)
+                command="preparedrives"
+                shift
+                ;;
             --caddy)
                 command="caddy"
                 shift
@@ -126,14 +133,25 @@ parse_args() {
                 export LOG_LEVEL="DEBUG"
                 shift
                 ;;
-            --caddy|--network|--pfsense|--firewalladmin|--check-mac|--all)
+            --raid-config)
+                export RAID_CONFIG="$2"
+                shift 2
+                ;;
+            --caddy|--network|--pfsense|--firewalladmin|--check-mac|--all|--preparedrives)
                 # Already handled above
                 shift
                 ;;
             *)
-                log "ERROR" "Unknown option: $1"
-                usage
-                exit 1
+                # For drive preparation, pass unknown arguments through
+                if [[ "$command" == "preparedrives" ]]; then
+                    # Store remaining arguments for drive preparation script
+                    export DRIVE_ARGS="$*"
+                    break
+                else
+                    log "ERROR" "Unknown option: $1"
+                    usage
+                    exit 1
+                fi
                 ;;
         esac
     done
@@ -155,6 +173,15 @@ validate_setup() {
     
     # Different validation based on command
     case "${COMMAND:-}" in
+        "preparedrives")
+            # Drive preparation has its own validation
+            log "INFO" "Drive preparation validation will be performed by prepare-drives.sh"
+            # Basic check for required tools
+            if ! command -v lsblk &> /dev/null; then
+                log "ERROR" "lsblk command not found. Please install util-linux package."
+                exit 1
+            fi
+            ;;
         "caddy")
             # Check if required environment variables are set for Caddy
             validate_env "DOMAIN" "EMAIL"
@@ -281,6 +308,9 @@ run_script() {
 # Main installation function
 main() {
     case "${COMMAND:-}" in
+        "preparedrives")
+            run_drive_preparation
+            ;;
         "caddy")
             run_caddy_setup
             ;;
@@ -305,6 +335,7 @@ main() {
             log "INFO" "=============================="
             echo
             log "INFO" "Available commands:"
+            log "INFO" "  --preparedrives  Prepare drives and configure RAID arrays"
             log "INFO" "  --caddy    Install Caddy reverse proxy with HTTPS"
             log "INFO" "  --network  Configure network interfaces for additional IPs"
             log "INFO" "  --pfsense  Create pfSense firewall VM (requires --network first)"
@@ -313,7 +344,7 @@ main() {
             log "INFO" "  --all      Complete setup (network + caddy) [FUTURE]"
             echo
             log "INFO" "Use --help for detailed information"
-            log "INFO" "Example: $0 --caddy"
+            log "INFO" "Example: $0 --preparedrives --dry-run"
             exit 0
             ;;
     esac
@@ -429,9 +460,9 @@ run_pfsense_setup() {
         log "INFO" "3. Install pfSense to disk and reboot"
         log "INFO" "4. Configure interfaces manually through console menu:"
         log "INFO" "   - WAN: Use one of your additional IPs (vtnet0)"
-        log "INFO" "   - LAN: 10.0.1.1/24 (vtnet1)"
+        log "INFO" "   - LAN: 192.168.1.1/24 (vtnet1)"
         log "INFO" "   - DMZ: 10.0.2.1/24 (vtnet2)"
-        log "INFO" "5. Access web interface from LAN: https://10.0.1.1"
+        log "INFO" "5. Access web interface from LAN: https://192.168.1.1"
         log "INFO" "6. Change default password (admin/pfsense)"
         log "INFO" "7. Configure firewall rules and port forwarding"
         log "INFO" "Configuration guide: config/pfsense/setup-instructions.md"
@@ -465,9 +496,9 @@ run_firewall_admin_setup() {
         log "INFO" "  Stop:     pct stop \${FIREWALL_ADMIN_CT_ID:-200}"
         log "INFO" "  Console:  pct console \${FIREWALL_ADMIN_CT_ID:-200}"
         log "INFO" "Access Information:"
-        log "INFO" "  LAN IP:   \${FIREWALL_ADMIN_LAN_IP:-10.0.1.10}"
+        log "INFO" "  LAN IP:   \${FIREWALL_ADMIN_LAN_IP:-192.168.1.10}"
         log "INFO" "  WAN IP:   Second additional IP from configuration"
-        log "INFO" "  pfSense:  https://\${PFSENSE_LAN_IP:-10.0.1.1}"
+        log "INFO" "  pfSense:  https://\${PFSENSE_LAN_IP:-192.168.1.1}"
         log "INFO" "Next Steps:"
         log "INFO" "1. Container should start automatically"
         log "INFO" "2. Access console: pct console \${FIREWALL_ADMIN_CT_ID:-200}"
@@ -507,6 +538,105 @@ run_mac_check() {
         log "INFO" "2. Create pfSense VM: $0 --pfsense" 
         log "INFO" "3. Create admin container: $0 --firewalladmin"
         log "INFO" "4. Configure HTTPS: $0 --caddy"
+        log "INFO" ""
+        log "INFO" "Logs are available at: $LOG_FILE"
+    fi
+}
+
+# Run drive preparation and RAID setup
+run_drive_preparation() {
+    log "INFO" "Starting Hetzner Proxmox drive preparation..."
+    log "INFO" "Logs are being written to: $LOG_FILE"
+    
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        log "INFO" "DRY RUN MODE - No changes will be made"
+    fi
+    
+    # Build arguments for the drive preparation script
+    local drive_args=()
+    
+    # Add dry-run flag if set
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        drive_args+=("--dry-run")
+    fi
+    
+    # Add verbose flag if set
+    if [[ "${LOG_LEVEL:-}" == "DEBUG" ]]; then
+        drive_args+=("--verbose")
+    fi
+    
+    # Check if a RAID configuration was specified
+    if [[ -n "${RAID_CONFIG:-}" ]]; then
+        drive_args+=("--config" "$RAID_CONFIG")
+    fi
+    
+    # Add any additional arguments passed through
+    if [[ -n "${DRIVE_ARGS:-}" ]]; then
+        # Parse the remaining arguments
+        eval "set -- $DRIVE_ARGS"
+        while [[ $# -gt 0 ]]; do
+            case $1 in
+                --config)
+                    if [[ -z "${RAID_CONFIG:-}" ]]; then
+                        drive_args+=("--config" "$2")
+                    fi
+                    shift 2
+                    ;;
+                --force)
+                    drive_args+=("--force")
+                    shift
+                    ;;
+                *)
+                    drive_args+=("$1")
+                    shift
+                    ;;
+            esac
+        done
+    fi
+    
+    # Run drive preparation script
+    local script_path="$SCRIPT_DIR/scripts/prepare-drives.sh"
+    
+    if [[ ! -f "$script_path" ]]; then
+        log "ERROR" "Drive preparation script not found: $script_path"
+        exit 1
+    fi
+    
+    log "INFO" "Executing drive preparation script..."
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        log "INFO" "Command: bash $script_path ${drive_args[*]}"
+    fi
+    
+    if ! bash "$script_path" "${drive_args[@]}"; then
+        log "ERROR" "Drive preparation failed"
+        exit 1
+    fi
+    
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        log "INFO" "DRY RUN completed - no changes were made"
+        log "INFO" "To execute for real, run without --dry-run flag"
+        log "INFO" ""
+        log "INFO" "💡 The script will automatically suggest the best RAID configuration"
+        log "INFO" "   based on your specific drive setup when you run it."
+        log "INFO" ""
+        log "INFO" "Examples:"
+        log "INFO" "  sudo ./install.sh --preparedrives --dry-run"
+        log "INFO" "  sudo ./install.sh --preparedrives --config <suggested-config>"
+        log "INFO" "  sudo ./install.sh --preparedrives --config <suggested-config> --force"
+    else
+        log "INFO" "✅ Drive Preparation Complete!"
+        log "INFO" "RAID arrays have been configured and are syncing"
+        log "INFO" ""
+        log "INFO" "Next Steps:"
+        log "INFO" "1. Monitor RAID sync: watch cat /proc/mdstat"
+        log "INFO" "2. Reboot system to verify configuration"
+        log "INFO" "3. Configure Proxmox storage pools"
+        log "INFO" "4. Continue with network setup: $0 --network"
+        log "INFO" ""
+        log "INFO" "Important Notes:"
+        log "INFO" "- RAID sync will continue in background"
+        log "INFO" "- System performance may be reduced during sync"
+        log "INFO" "- Check /proc/mdstat to monitor progress"
         log "INFO" ""
         log "INFO" "Logs are available at: $LOG_FILE"
     fi
