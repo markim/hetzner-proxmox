@@ -116,6 +116,28 @@ cmd_list() {
     log "INFO" "Current RAID arrays:"
     if [[ -f /proc/mdstat ]] && grep -q "^md" /proc/mdstat 2>/dev/null; then
         cat /proc/mdstat
+        echo
+        
+        # Show detailed information for each array
+        local arrays=()
+        while IFS= read -r line; do
+            if [[ "$line" =~ ^(md[0-9]+) ]]; then
+                arrays+=("/dev/${BASH_REMATCH[1]}")
+            fi
+        done < /proc/mdstat
+        
+        if [[ ${#arrays[@]} -gt 0 ]]; then
+            log "INFO" "Detailed array information:"
+            for array in "${arrays[@]}"; do
+                echo "--- $array ---"
+                if command -v mdadm >/dev/null 2>&1; then
+                    mdadm --detail "$array" 2>/dev/null || log "WARNING" "Could not get details for $array"
+                else
+                    log "WARNING" "mdadm command not available for detailed info"
+                fi
+                echo
+            done
+        fi
     else
         log "INFO" "  No RAID arrays found"
     fi
@@ -399,6 +421,28 @@ show_raid_status() {
     log "INFO" "Current RAID arrays:"
     if [[ -f /proc/mdstat ]] && grep -q "^md" /proc/mdstat 2>/dev/null; then
         cat /proc/mdstat
+        echo
+        
+        # Show detailed information for each array
+        local arrays=()
+        while IFS= read -r line; do
+            if [[ "$line" =~ ^(md[0-9]+) ]]; then
+                arrays+=("/dev/${BASH_REMATCH[1]}")
+            fi
+        done < /proc/mdstat
+        
+        if [[ ${#arrays[@]} -gt 0 ]]; then
+            log "INFO" "Detailed array information:"
+            for array in "${arrays[@]}"; do
+                echo "--- $array ---"
+                if command -v mdadm >/dev/null 2>&1; then
+                    mdadm --detail "$array" 2>/dev/null || log "WARNING" "Could not get details for $array"
+                else
+                    log "WARNING" "mdadm command not available for detailed info"
+                fi
+                echo
+            done
+        fi
     else
         log "INFO" "  No RAID arrays found"
     fi
