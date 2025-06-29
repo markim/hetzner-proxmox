@@ -59,40 +59,89 @@ EOF
 
 # Detect system drive (the one with mounted partitions)
 detect_system_drive() {
-    log "INFO" "Detecting system drive..."
+    log "DEBUG" "Detecting system drives..."
     
-    # Find all devices with mounted partitions or swap
     local system_drives=()
     
-    # Get all mounted block devices (including LVM, partitions, etc.)
-    while IFS= read -r device; do
-        if [[ -n "$device" ]]; then
-            # Extract the base device name (remove partition numbers and LVM)
-            local base_device
-            base_device=$(echo "$device" | sed 's|/dev/||' | sed 's/[0-9]*$//' | sed 's/-.*$//')
-            system_drives+=("/dev/$base_device")
+    # Method 1: Find drives that have any mounted partitions
+    log "DEBUG" "Checking for mounted partitions..."
+    while IFS= read -r line; do
+        local name mountpoint
+        name=$(echo "$line" | awk '{print $1}')
+        mountpoint=$(echo "$line" | awk '{print $2}')
+        
+        if [[ -n "$mountpoint" && "$mountpoint" != "" ]]; then
+            # Extract the base disk name
+            local base_disk
+            if [[ "$name" =~ ^nvme[0-9]+n[0-9]+p[0-9]+$ ]]; then
+                # NVMe partition (e.g., nvme1n1p1 -> nvme1n1)
+                base_disk=$(echo "$name" | sed 's/p[0-9]*$//')
+            elif [[ "$name" =~ ^[sv]d[a-z]+[0-9]+$ ]]; then
+                # SATA/SCSI partition (e.g., sda1 -> sda)
+                base_disk=$(echo "$name" | sed 's/[0-9]*$//')
+            elif [[ "$name" =~ ^vg[0-9]+-.*$ ]]; then
+                # LVM volume - need to find the parent PV
+                log "DEBUG" "Found LVM volume: $name, finding parent physical volume..."
+                local vg_name
+                vg_name=$(echo "$name" | cut -d'-' -f1)
+                while IFS= read -r pv_line; do
+                    local pv_name
+                    pv_name=$(echo "$pv_line" | awk '{print $1}' | sed 's|/dev/||')
+                    if [[ "$pv_name" =~ ^nvme[0-9]+n[0-9]+p[0-9]+$ ]]; then
+                        base_disk=$(echo "$pv_name" | sed 's/p[0-9]*$//')
+                    elif [[ "$pv_name" =~ ^[sv]d[a-z]+[0-9]+$ ]]; then
+                        base_disk=$(echo "$pv_name" | sed 's/[0-9]*$//')
+                    fi
+                    if [[ -n "$base_disk" ]]; then
+                        break
+                    fi
+                done < <(pvs --noheadings -o pv_name,vg_name 2>/dev/null | grep "$vg_name" || true)
+            else
+                # Fallback: remove numbers from the end
+                base_disk=$(echo "$name" | sed 's/[0-9]*$//')
+            fi
+            
+            if [[ -n "$base_disk" ]]; then
+                system_drives+=("/dev/$base_disk")
+                log "DEBUG" "Found mounted partition $name on $mountpoint -> base disk: /dev/$base_disk"
+            fi
         fi
-    done < <(lsblk -nlo NAME,MOUNTPOINTS | awk '$2 != "" {print "/dev/" $1}')
+    done < <(lsblk -nlo NAME,MOUNTPOINTS)
     
-    # Also check for swap devices
-    while IFS= read -r device; do
-        if [[ -n "$device" ]]; then
-            local base_device
-            base_device=$(echo "$device" | sed 's|/dev/||' | sed 's/[0-9]*$//' | sed 's/-.*$//')
-            system_drives+=("/dev/$base_device")
+    # Method 2: Find drives with swap partitions
+    log "DEBUG" "Checking for swap partitions..."
+    while IFS= read -r line; do
+        local name fstype
+        name=$(echo "$line" | awk '{print $1}')
+        fstype=$(echo "$line" | awk '{print $2}')
+        
+        if [[ "$fstype" == "swap" ]]; then
+            local base_disk
+            if [[ "$name" =~ ^nvme[0-9]+n[0-9]+p[0-9]+$ ]]; then
+                base_disk=$(echo "$name" | sed 's/p[0-9]*$//')
+            elif [[ "$name" =~ ^[sv]d[a-z]+[0-9]+$ ]]; then
+                base_disk=$(echo "$name" | sed 's/[0-9]*$//')
+            else
+                base_disk=$(echo "$name" | sed 's/[0-9]*$//')
+            fi
+            
+            if [[ -n "$base_disk" ]]; then
+                system_drives+=("/dev/$base_disk")
+                log "DEBUG" "Found swap partition $name -> base disk: /dev/$base_disk"
+            fi
         fi
-    done < <(lsblk -nlo NAME,FSTYPE | awk '$2 == "swap" {print "/dev/" $1}')
+    done < <(lsblk -nlo NAME,FSTYPE)
     
     # Remove duplicates and sort
     local unique_drives
     mapfile -t unique_drives < <(printf '%s\n' "${system_drives[@]}" | sort -u)
     
     if [[ ${#unique_drives[@]} -eq 0 ]]; then
-        log "ERROR" "No system drive detected"
+        log "ERROR" "No system drives detected"
         exit 1
     fi
     
-    log "INFO" "System drives detected: ${unique_drives[*]}"
+    log "DEBUG" "System drives detected: ${unique_drives[*]}"
     printf '%s\n' "${unique_drives[@]}"
 }
 
@@ -222,9 +271,16 @@ main() {
     lsblk -o NAME,SIZE,TYPE,MOUNTPOINTS,FSTYPE,MODEL
     echo
     
+    # Enable debug logging temporarily for detection
+    local old_log_level="${LOG_LEVEL:-INFO}"
+    export LOG_LEVEL="DEBUG"
+    
     # Get system and non-system drives
     local system_drives
     mapfile -t system_drives < <(detect_system_drive)
+    
+    # Restore original log level
+    export LOG_LEVEL="$old_log_level"
     
     local non_system_drives
     mapfile -t non_system_drives < <(get_non_system_drives)
