@@ -429,6 +429,12 @@ validate_raid_config() {
             if [[ $group_count -ne 2 ]]; then
                 log "ERROR" "Dual RAID 1 requires exactly 2 different drive size groups"
                 log "ERROR" "Found: $group_count drive size groups"
+                if [[ $group_count -eq 1 ]]; then
+                    log "INFO" "💡 To use dual-raid1:"
+                    log "INFO" "  • Add drives of a different size to create a second group"
+                    log "INFO" "  • Each group needs at least 2 drives for RAID 1"
+                    log "INFO" "  • Consider 'no-raid' or 'raid1-{category}' if you have 2+ drives of the same size"
+                fi
                 return 1
             fi
             
@@ -440,6 +446,9 @@ validate_raid_config() {
                 if [[ $count -lt 2 ]]; then
                     log "ERROR" "Dual RAID 1 requires at least 2 drives in each size group"
                     log "ERROR" "Group $category has only $count drive(s)"
+                    log "INFO" "💡 To use dual-raid1:"
+                    log "INFO" "  • Add another drive to the $category group"
+                    log "INFO" "  • Both groups need at least 2 drives each for RAID 1"
                     return 1
                 fi
             done
@@ -1784,7 +1793,7 @@ interactive_config_selection() {
     done
     
     # Add dual RAID option if exactly 2 groups with 2+ drives each
-    if [[ $group_count -eq 2 ]]; then
+    if [[ $group_count -eq  2 ]]; then
         local can_dual_raid=true
         for category in "${!drive_groups[@]}"; do
             local drives_in_category
@@ -2055,196 +2064,86 @@ EOF
     export BACKUP_DIR="$backup_dir"
 }
 
-# Main execution function
-main() {
-    # Set error handler
-    trap 'error_handler ${LINENO} $?' ERR
+# Show available configurations for current hardware
+show_available_configs() {
+    local configs=()
+    local descriptions=()
+    local group_count=${#drive_groups[@]}
     
-    # Parse command line arguments
-    parse_args "$@"
+    # Add configuration options based on what's actually possible
+    local total_drives=0
+    for category in "${!drive_groups[@]}"; do
+        local drives_in_category
+        IFS=' ' read -ra drives_in_category <<< "${drive_groups[$category]}"
+        total_drives=$((total_drives + ${#drives_in_category[@]}))
+    done
     
-    # Enable debug logging for dry runs to help troubleshoot drive detection
-    if [[ "${DRY_RUN:-false}" == "true" ]]; then
-        export LOG_LEVEL="DEBUG"
-        log "DEBUG" "Debug logging enabled for dry run mode"
+    if [[ $total_drives -eq 1 ]]; then
+        # Single drive scenario
+        configs+=("no-raid")
+        descriptions+=("Use single drive (⚠️  NO REDUNDANCY - ensure backups)")
     fi
     
-    # Show usage if no arguments and not in cleanup mode
-    if [[ -z "${RAID_CONFIG:-}" ]] && [[ "${DRY_RUN:-false}" == "false" ]] && [[ "${CLEANUP_ONLY:-false}" == "false" ]]; then
-        usage
-        exit 0
+    # Add no-raid as always available option
+    if [[ $total_drives -gt 1 ]]; then
+        configs+=("no-raid")
+        descriptions+=("Use drives individually (no RAID)")
     fi
     
-    # Handle cleanup mode
-    if [[ "${CLEANUP_ONLY:-false}" == "true" ]]; then
-        log "INFO" "Cleanup mode - removing existing RAID arrays"
-        # Add cleanup logic here if needed
-        exit 0
-    fi
-    
-    log "INFO" "🚀 Starting Hetzner Proxmox Drive Preparation"
-    log "INFO" "$(date)"
-    echo
-    
-    # Detect and analyze drives
-    log "INFO" "🔍 Detecting available drives..."
-    
-    # Enhanced drive detection with debugging
-    log "DEBUG" "Starting comprehensive drive detection..."
-    log "DEBUG" "System information:"
-    log "DEBUG" "  OS: $(uname -a 2>/dev/null || echo 'unknown')"
-    log "DEBUG" "  Block devices: $(find /dev -name 'sd*' -o -name 'nvme*' -o -name 'vd*' | wc -l 2>/dev/null || echo 'unknown') potential devices found"
-    
-    local drives
-    mapfile -t drives < <(detect_drives)
-    
-    if [[ ${#drives[@]} -eq 0 ]]; then
-        log "ERROR" "No suitable drives found"
-        exit 1
-    fi
-    
-    log "INFO" "Analyzing drive configuration..."
-    analyze_drives "${drives[@]}"
-    
-       
-    # Suggest best configuration
-
-    suggest_best_config
-    
-    # If a specific config was provided, use it; otherwise prompt user
-    if [[ -n "${RAID_CONFIG:-}" ]]; then
-        if [[ "$RAID_CONFIG" == "auto" ]] || [[ "$RAID_CONFIG" == "recommended" ]]; then
-            export SELECTED_CONFIG="${RECOMMENDED_CONFIG:-no-raid}"
-            log "INFO" "Using recommended configuration: $SELECTED_CONFIG"
-        else
-            export SELECTED_CONFIG="$RAID_CONFIG"
-            log "INFO" "Using specified configuration: $SELECTED_CONFIG"
+    # Add RAID options for each category that has enough drives
+    for category in "${!drive_groups[@]}"; do
+        local drives_in_category
+        IFS=' ' read -ra drives_in_category <<< "${drive_groups[$category]}"
+        local count=${#drives_in_category[@]}
+        local size_gb=${drive_sizes_gb[$category]}
+        
+        if [[ $count -ge 2 ]]; then
+            configs+=("raid1-${category}")
+            descriptions+=("RAID 1 with ${count}x ${category} drives (~${size_gb}GB usable, mirrored)")
         fi
-    else
-        # Interactive mode - let user choose
-        interactive_config_selection
-    fi
-    
-    # Validate the configuration
-    if ! validate_raid_config "$SELECTED_CONFIG"; then
-        log "ERROR" "Invalid RAID configuration: $SELECTED_CONFIG"
-        exit 1
-    fi
-    
-    # Preview the configuration
-    echo
-    log "INFO" "🎯 Configuration Preview"
-    log "INFO" "Selected configuration: $SELECTED_CONFIG"
-    echo
-    
-    preview_raid_config "$SELECTED_CONFIG"
-    echo
-    
-    # Handle dry-run mode
-    if [[ "${DRY_RUN:-false}" == "true" ]]; then
-        log "INFO" "🏃 DRY RUN MODE - No changes will be made"
-        log "INFO" ""
-        log "INFO" "To execute this configuration for real:"
-        if [[ -n "${RAID_CONFIG:-}" ]]; then
-            log "INFO" "  $0 --config \"$SELECTED_CONFIG\""
-        else
-            log "INFO" "  $0 --config \"$SELECTED_CONFIG\""
+        
+        if [[ $count -ge 3 ]]; then
+            configs+=("raid5-${category}")
+            descriptions+=("RAID 5 with ${count}x ${category} drives (~$((size_gb * (count - 1)))GB usable)")
         fi
-        log "INFO" ""
-        log "INFO" "Add --force to skip confirmations (use with caution)"
-        exit 0
-    fi
-    
-    # Handle scan-only mode
-    if [[ "$SELECTED_CONFIG" == "scan-only" ]]; then
-        log "INFO" "✅ Scan completed. No changes made."
-        log "INFO" ""
-        log "INFO" "To apply a configuration, run:"
-        log "INFO" "  $0 --config <configuration-name>"
-        exit 0
-    fi
-    
-    # Handle show-expansion-options mode
-    if [[ "$SELECTED_CONFIG" == "show-expansion-options" ]]; then
-        log "INFO" "🔧 Drive Expansion Options"
-        echo
         
-        # Get the current drive size for reference
-        local current_category
-        current_category="${!drive_groups[*]}"
-        local current_size_gb=${drive_sizes_gb[$current_category]}
-        local current_drive
-        current_drive="${drive_groups[$current_category]}"
+        if [[ $count -ge 4 ]]; then
+            configs+=("raid6-${category}")
+            descriptions+=("RAID 6 with ${count}x ${category} drives (~$((size_gb * (count - 2)))GB usable)")
+            
+            configs+=("raid10-${category}")
+            descriptions+=("RAID 10 with ${count}x ${category} drives (~$((size_gb * count / 2))GB usable, striped mirrors)")
+        fi
+    done
+    
+    # Add dual RAID option if exactly 2 groups with 2+ drives each
+    if [[ $group_count -eq 2 ]]; then
+        local can_dual_raid=true
+        for category in "${!drive_groups[@]}"; do
+            local drives_in_category
+            IFS=' ' read -ra drives_in_category <<< "${drive_groups[$category]}"
+            local count=${#drives_in_category[@]}
+            if [[ $count -lt 2 ]]; then
+                can_dual_raid=false
+                break
+            fi
+        done
         
-        log "INFO" "Current setup: 1x $current_category ($current_drive)"
-        log "INFO" "Drive size: ${current_size_gb}GB"
-        echo
-        
-        log "INFO" "🎯 RAID Options Available with Additional Drives:"
-        echo
-        log "INFO" "With 2x identical drives (add 1 more ${current_category}):"
-        log "INFO" "  • RAID 1 - Perfect redundancy, ~$((current_size_gb))GB usable (mirrors data)"
-        log "INFO" "  • Benefit: Drive failure protection, automatic failover"
-        echo
-        log "INFO" "With 3x identical drives (add 2 more ${current_category}):"
-        log "INFO" "  • RAID 5 - Good redundancy + capacity, ~$((current_size_gb * 2))GB usable"
-        log "INFO" "  • Benefit: Better storage efficiency than RAID 1"
-        echo
-        log "INFO" "With 4x identical drives (add 3 more ${current_category}):"
-        log "INFO" "  • RAID 10 - Excellent performance + redundancy, ~$((current_size_gb * 2))GB usable (striped mirrors)"
-        log "INFO" "  • RAID 6 - Dual redundancy, ~$((current_size_gb * 2))GB usable"
-        log "INFO" "  • Benefit: Can survive multiple drive failures"
-        echo
-        log "INFO" "With mixed drive sizes:"
-        log "INFO" "  • Dual RAID 1 - Separate arrays for different drive sizes"
-        log "INFO" "  • Mixed optimal - RAID for matching pairs, individual for others"
-        echo
-        log "INFO" "🛒 Shopping list for RAID 1 (recommended next step):"
-        log "INFO" "  • 1x ${current_category} drive (${current_size_gb}GB)"
-        log "INFO" "  • Must be same interface (NVMe/SATA) for best compatibility"
-        echo
-        log "INFO" "💡 After adding drives, re-run: $0 --dry-run"
-        exit 0
+        if [[ "$can_dual_raid" == "true" ]]; then
+            configs+=("dual-raid1")
+            descriptions+=("Dual RAID 1 - separate arrays for each drive size (recommended)")
+        fi
     fi
     
-    # Safety checks and confirmations for destructive operations
-    if [[ "${FORCE:-false}" != "true" ]]; then
-        perform_safety_checks
-        confirm_operation "$SELECTED_CONFIG"
+    # Add mixed optimal if 3+ groups
+    if [[ $group_count -ge 3 ]]; then
+        configs+=("mixed-optimal")
+        descriptions+=("Mixed optimal - RAID for matching drives, individual for others")
     fi
     
-    # Create emergency restore information
-    create_emergency_info
-    
-    # Execute the configuration
-    log "INFO" "🔧 Executing drive configuration: $SELECTED_CONFIG"
-    log "INFO" "This may take several minutes..."
-    echo
-    
-    if ! execute_raid_config "$SELECTED_CONFIG"; then
-        log "ERROR" "Drive configuration failed"
-        log "ERROR" "Emergency restore information available at: ${BACKUP_DIR:-/root/drive-backup-*}"
-        exit 1
-    fi
-    
-    # Update system configuration
-    update_system_config "$SELECTED_CONFIG"
-    
-    log "INFO" "✅ Drive preparation completed successfully!"
-    echo
-    log "INFO" "📊 Summary:"
-    log "INFO" "  Configuration: $SELECTED_CONFIG"
-    log "INFO" "  Backup info: ${BACKUP_DIR:-/root/drive-backup-*}"
-    log "INFO" "  Status: All operations completed"
-    echo
-    log "INFO" "🔄 Next Steps:"
-    log "INFO" "1. Monitor RAID sync (if applicable): watch cat /proc/mdstat"
-    log "INFO" "2. Reboot to verify configuration: reboot"
-    log "INFO" "3. Configure Proxmox storage pools in web interface"
-    log "INFO" "4. Continue with network setup: ./install.sh --network"
+    # Display available options
+    for i in "${!configs[@]}"; do
+        local num=$((i + 1))
+        printf "  %2d) %-20s %s\n" "$num" "${configs[$i]}" "${descriptions[$i]}"
+    done
 }
-
-# Run main function if script is executed directly
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-    main "$@"
-fi
