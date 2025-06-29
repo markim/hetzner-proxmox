@@ -102,8 +102,6 @@ parse_args() {
 
 # Detect available drives
 detect_drives() {
-    log "INFO" "Detecting available drives..."
-    
     # Get all drives except loop devices and ram
     local drives=($(lsblk -dn -o NAME,SIZE,TYPE | grep -E '^(sd|nvme|vd)' | grep disk | awk '{print "/dev/" $1}'))
     
@@ -112,14 +110,18 @@ detect_drives() {
         exit 1
     fi
     
-    log "INFO" "Found ${#drives[@]} drives:"
-    for drive in "${drives[@]}"; do
-        local size=$(lsblk -dn -o SIZE "$drive" 2>/dev/null || echo "unknown")
-        local model=$(lsblk -dn -o MODEL "$drive" 2>/dev/null || echo "unknown")
-        log "INFO" "  $drive: $size ($model)"
-    done
+    # Log the detected drives but return only the drive paths
+    {
+        log "INFO" "Found ${#drives[@]} drives:"
+        for drive in "${drives[@]}"; do
+            local size=$(lsblk -dn -o SIZE "$drive" 2>/dev/null || echo "unknown")
+            local model=$(lsblk -dn -o MODEL "$drive" 2>/dev/null || echo "unknown")
+            log "INFO" "  $drive: $size ($model)"
+        done
+    } >&2
     
-    echo "${drives[@]}"
+    # Return only the drive paths (no log output)
+    printf "%s\n" "${drives[@]}"
 }
 
 # Analyze drive configuration
@@ -1245,7 +1247,10 @@ main() {
     echo
     
     # Detect and analyze drives
-    local drives=($(detect_drives))
+    log "INFO" "Detecting available drives..."
+    local drives_output
+    drives_output=$(detect_drives)
+    local drives=($drives_output)
     
     if [[ ${#drives[@]} -eq 0 ]]; then
         log "ERROR" "No suitable drives found for RAID configuration"
