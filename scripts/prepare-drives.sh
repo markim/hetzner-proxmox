@@ -125,14 +125,53 @@ parse_args() {
 
 # Detect available drives
 detect_drives() {
-    # Get all drives except loop devices and ram
+    log "DEBUG" "Starting drive detection..."
+    
+    # Show all block devices for debugging
+    log "DEBUG" "All block devices found by lsblk:"
+    lsblk -dn -o NAME,SIZE,TYPE,MODEL 2>/dev/null | while read -r line; do
+        log "DEBUG" "  $line"
+    done
+    
+    # Get all drives except loop devices and ram - expanded detection
     local drives_raw
-    drives_raw=$(lsblk -dn -o NAME,SIZE,TYPE 2>/dev/null | grep -E '^(sd|nvme|vd)' | grep disk | awk '{print "/dev/" $1}' || true)
+    drives_raw=$(lsblk -dn -o NAME,SIZE,TYPE 2>/dev/null | \
+        grep -E '^(sd|nvme|vd|xvd|hd)' | \
+        grep disk | \
+        awk '{print "/dev/" $1}' || true)
+    
+    # Additional detection for drives that might be missed
+    local additional_drives
+    additional_drives=""
+    
+    # Check for drives in /dev that might be missed by lsblk
+    for potential_drive in /dev/sd* /dev/nvme* /dev/vd* /dev/xvd* /dev/hd*; do
+        if [[ -b "$potential_drive" ]] && [[ "$potential_drive" =~ /dev/(sd[a-z]+|nvme[0-9]+n[0-9]+|vd[a-z]+|xvd[a-z]+|hd[a-z]+)$ ]]; then
+            # Check if this drive is not already in our list
+            if [[ "$drives_raw" != *"$potential_drive"* ]]; then
+                # Verify it's actually a disk (not a partition)
+                local device_type
+                device_type=$(lsblk -dn -o TYPE "$potential_drive" 2>/dev/null || echo "")
+                if [[ "$device_type" == "disk" ]]; then
+                    log "DEBUG" "Found additional drive via filesystem scan: $potential_drive"
+                    additional_drives="$additional_drives $potential_drive"
+                fi
+            fi
+        fi
+    done
+    
+    # Combine the results
+    if [[ -n "$additional_drives" ]]; then
+        drives_raw="$drives_raw $additional_drives"
+        log "DEBUG" "Combined drive list: $drives_raw"
+    fi
     
     if [[ -z "$drives_raw" ]]; then
         log "ERROR" "No suitable drives found"
-        log "DEBUG" "lsblk output:"
-        lsblk -dn -o NAME,SIZE,TYPE 2>/dev/null || log "DEBUG" "lsblk command failed"
+        log "DEBUG" "Full lsblk output for troubleshooting:"
+        lsblk -a 2>/dev/null || log "DEBUG" "lsblk command failed"
+        log "DEBUG" "Checking /dev directory for block devices:"
+        find /dev -name 'sd*' -o -name 'nvme*' -o -name 'vd*' -o -name 'xvd*' -o -name 'hd*' | head -20
         exit 1
     fi
     
@@ -144,20 +183,74 @@ detect_drives() {
         exit 1
     fi
     
+    # Filter out invalid or unusable drives
+    local valid_drives=()
+    for drive in "${drives[@]}"; do
+        if [[ -b "$drive" ]]; then
+            # Check if drive is in use (mounted or part of RAID/LVM)
+            local in_use=false
+            
+            # Check if any partitions are mounted
+            if lsblk -ln -o MOUNTPOINT "$drive" 2>/dev/null | grep -q '^/' 2>/dev/null; then
+                log "DEBUG" "Drive $drive has mounted partitions, checking if we should include it..."
+                in_use=true
+                # For now, include drives with mounted partitions but warn about it
+                # The user can decide what to do with them
+            fi
+            
+            # Check if drive is part of existing RAID
+            if grep -q "$(basename "$drive")" /proc/mdstat 2>/dev/null; then
+                log "DEBUG" "Drive $drive is part of existing RAID array"
+                in_use=true
+            fi
+            
+            # Check if drive is part of LVM
+            if command -v pvdisplay >/dev/null 2>&1 && pvdisplay 2>/dev/null | grep -q "$drive" 2>/dev/null; then
+                log "DEBUG" "Drive $drive is part of LVM"
+                in_use=true
+            fi
+            
+            # For safety, include all detected drives but provide detailed information
+            if [[ "$in_use" == "true" ]]; then
+                log "WARNING" "Drive $drive appears to be in use but will be included in analysis"
+            fi
+            valid_drives+=("$drive")
+        else
+            log "DEBUG" "Skipping non-existent drive: $drive"
+        fi
+    done
+    
+    if [[ ${#valid_drives[@]} -eq 0 ]]; then
+        log "ERROR" "No valid drives found after validation"
+        exit 1
+    fi
+    
     # Log the detected drives but return only the drive paths
     {
-        log "INFO" "Found ${#drives[@]} drives:"
-        for drive in "${drives[@]}"; do
+        log "INFO" "Found ${#valid_drives[@]} drives:"
+        for drive in "${valid_drives[@]}"; do
             local size
             local model
+            local usage_info=""
+            
             size=$(lsblk -dn -o SIZE "$drive" 2>/dev/null || echo "unknown")
             model=$(lsblk -dn -o MODEL "$drive" 2>/dev/null | sed 's/[[:space:]]\+/ /g' || echo "unknown")
-            log "INFO" "  $drive: $size ($model)"
+            
+            # Check for existing usage
+            if lsblk -ln -o MOUNTPOINT "$drive" 2>/dev/null | grep -q '^/' 2>/dev/null; then
+                usage_info=" [HAS MOUNTED PARTITIONS]"
+            elif grep -q "$(basename "$drive")" /proc/mdstat 2>/dev/null; then
+                usage_info=" [IN RAID ARRAY]"
+            elif pvdisplay 2>/dev/null | grep -q "$drive" 2>/dev/null; then
+                usage_info=" [IN LVM]"
+            fi
+            
+            log "INFO" "  $drive: $size ($model)$usage_info"
         done
     } >&2
     
     # Return only the drive paths (no log output)
-    printf "%s\n" "${drives[@]}"
+    printf "%s\n" "${valid_drives[@]}"
 }
 
 # Analyze drive configuration
@@ -359,7 +452,7 @@ validate_raid_config() {
                 return 1
             fi
             ;;
-        "mixed-optimal"|"no-raid"|"individual-"*|"scan-only")
+        "mixed-optimal"|"no-raid"|"individual-"*|"scan-only"|"show-expansion-options")
             # These configurations don't have strict requirements
             ;;
         *)
@@ -718,6 +811,21 @@ suggest_best_config() {
             best_config="no-raid"
             reason="Single drive: No redundancy possible"
             recommendations+=("no-raid:⭐ ONLY OPTION - Single drive configuration")
+            
+            # Provide helpful suggestions for single drive scenarios
+            log "INFO" ""
+            log "WARNING" "⚠️  Single Drive Configuration Detected"
+            log "INFO" "Current setup: 1x ${category} drive"
+            log "INFO" ""
+            log "INFO" "💡 Recommendations for production use:"
+            log "INFO" "  • Consider adding a second identical drive for RAID 1 redundancy"
+            log "INFO" "  • Ensure you have reliable backups as drive failure = data loss"
+            log "INFO" "  • Monitor drive health with S.M.A.R.T tools"
+            log "INFO" ""
+            log "INFO" "🛒 To enable RAID redundancy:"
+            log "INFO" "  • Add another ${category} drive (same size recommended)"
+            log "INFO" "  • Re-run this script to configure RAID 1"
+            log "INFO" ""
         fi
         
     elif [[ $group_count -eq 2 ]]; then
@@ -1559,8 +1667,27 @@ interactive_config_selection() {
     configs+=("scan-only")
     descriptions+=("Scan drives and show recommendations (safe, no changes)")
     
-    configs+=("no-raid")
-    descriptions+=("Use all drives individually (no redundancy)")
+    # Add configuration options based on what's actually possible
+    local total_drives=0
+    for category in "${!drive_groups[@]}"; do
+        local drives_in_category
+        IFS=' ' read -ra drives_in_category <<< "${drive_groups[$category]}"
+        total_drives=$((total_drives + ${#drives_in_category[@]}))
+    done
+    
+    if [[ $total_drives -eq 1 ]]; then
+        # Single drive scenario - provide clear options and guidance
+        configs+=("no-raid")
+        descriptions+=("Use single drive (⚠️  NO REDUNDANCY - ensure backups)")
+        
+        # Add a helpful option to show what would be possible with more drives
+        configs+=("show-expansion-options")
+        descriptions+=("Show what RAID options would be available with additional drives")
+    else
+        # Multiple drives - show normal options
+        configs+=("no-raid") 
+        descriptions+=("Use all drives individually (no redundancy, full capacity)")
+    fi
     
     # Add RAID options based on detected drives
     local group_count=${#drive_groups[@]}
@@ -1889,6 +2016,13 @@ main() {
     
     # Detect and analyze drives
     log "INFO" "🔍 Detecting available drives..."
+    
+    # Enhanced drive detection with debugging
+    log "DEBUG" "Starting comprehensive drive detection..."
+    log "DEBUG" "System information:"
+    log "DEBUG" "  OS: $(uname -a 2>/dev/null || echo 'unknown')"
+    log "DEBUG" "  Block devices: $(find /dev -name 'sd*' -o -name 'nvme*' -o -name 'vd*' | wc -l 2>/dev/null || echo 'unknown') potential devices found"
+    
     local drives
     mapfile -t drives < <(detect_drives)
     
@@ -1955,6 +2089,49 @@ main() {
         log "INFO" ""
         log "INFO" "To apply a configuration, run:"
         log "INFO" "  $0 --config <configuration-name>"
+        exit 0
+    fi
+    
+    # Handle show-expansion-options mode
+    if [[ "$SELECTED_CONFIG" == "show-expansion-options" ]]; then
+        log "INFO" "🔧 Drive Expansion Options"
+        echo
+        
+        # Get the current drive size for reference
+        local current_category
+        current_category="${!drive_groups[*]}"
+        local current_size_gb=${drive_sizes_gb[$current_category]}
+        local current_drive
+        current_drive="${drive_groups[$current_category]}"
+        
+        log "INFO" "Current setup: 1x $current_category ($current_drive)"
+        log "INFO" "Drive size: ${current_size_gb}GB"
+        echo
+        
+        log "INFO" "🎯 RAID Options Available with Additional Drives:"
+        echo
+        log "INFO" "With 2x identical drives (add 1 more ${current_category}):"
+        log "INFO" "  • RAID 1 - Perfect redundancy, ~$((current_size_gb))GB usable"
+        log "INFO" "  • Benefit: Drive failure protection, automatic failover"
+        echo
+        log "INFO" "With 3x identical drives (add 2 more ${current_category}):"
+        log "INFO" "  • RAID 5 - Good redundancy + capacity, ~$((current_size_gb * 2))GB usable"
+        log "INFO" "  • Benefit: Better storage efficiency than RAID 1"
+        echo
+        log "INFO" "With 4x identical drives (add 3 more ${current_category}):"
+        log "INFO" "  • RAID 10 - Excellent performance + redundancy, ~$((current_size_gb * 2))GB usable"
+        log "INFO" "  • RAID 6 - Dual redundancy, ~$((current_size_gb * 2))GB usable"
+        log "INFO" "  • Benefit: Can survive multiple drive failures"
+        echo
+        log "INFO" "With mixed drive sizes:"
+        log "INFO" "  • Dual RAID 1 - Separate arrays for different drive sizes"
+        log "INFO" "  • Mixed optimal - RAID for matching pairs, individual for others"
+        echo
+        log "INFO" "🛒 Shopping list for RAID 1 (recommended next step):"
+        log "INFO" "  • 1x ${current_category} drive (${current_size_gb}GB)"
+        log "INFO" "  • Must be same interface (NVMe/SATA) for best compatibility"
+        echo
+        log "INFO" "💡 After adding drives, re-run: $0 --dry-run"
         exit 0
     fi
     
