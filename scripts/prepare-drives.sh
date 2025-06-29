@@ -48,8 +48,20 @@ EXAMPLES:
     $0 list                               # List drives and RAID status
     $0 clear-all                          # Remove all RAID arrays
     $0 clear /dev/md0                     # Remove specific array
-    $0 create 1 /dev/nvme1n1 /dev/nvme2n1 # Create RAID 1 with two drives
-    $0 --dry-run create 5 /dev/sd{a,b,c}  # Preview RAID 5 creation
+    $0 create 1 /dev/nvme1n1 /dev/nvme2n1 # Create RAID 1 mirror with two drives
+    $0 create 1 /dev/sda /dev/sdb         # Create RAID 1 mirror with SATA drives
+    $0 create 5 /dev/sd{a,b,c}            # Create RAID 5 with three drives
+    $0 --dry-run create 1 /dev/sd{a,b}    # Preview RAID 1 creation
+
+COMMON MIRRORING SCENARIOS:
+    Data drives:
+        $0 create 1 /dev/sdb /dev/sdc     # Mirror two data drives
+    
+    Multiple data drives:
+        $0 create 10 /dev/sd{b,c,d,e}     # RAID 10 for performance + redundancy
+    
+    Check if drive can be mirrored:
+        $0 list                           # See current drive usage
 
 SAFETY:
     - Always backup important data first
@@ -416,6 +428,299 @@ get_raid_level() {
     done
 }
 
+# Interactive RAID creation
+interactive_create_raid() {
+    log "INFO" "=== Create New RAID Array ==="
+    
+    # Check for available drives
+    local available_drives=()
+    while IFS= read -r drive_info; do
+        local drive
+        drive=$(echo "$drive_info" | cut -d: -f1)
+        # Only include drives not in use
+        if [[ ! "$drive_info" =~ \[(MOUNTED|IN\ RAID|IN\ LVM)\] ]]; then
+            available_drives+=("$drive_info")
+        fi
+    done < <(detect_drives 2>/dev/null || true)
+    
+    if [[ ${#available_drives[@]} -eq 0 ]]; then
+        log "ERROR" "No available drives found for RAID creation"
+        log "INFO" "All drives appear to be in use. Consider:"
+        log "INFO" "  • Adding new drives to the system"
+        log "INFO" "  • Removing existing RAID arrays if no longer needed"
+        log "INFO" "  • Backing up and wiping drives to reuse them"
+        return 1
+    fi
+    
+    log "INFO" "Available drives for RAID:"
+    for i in "${!available_drives[@]}"; do
+        local drive_info="${available_drives[$i]}"
+        local drive size model
+        drive=$(echo "$drive_info" | cut -d: -f1)
+        size=$(echo "$drive_info" | cut -d: -f2)
+        model=$(echo "$drive_info" | cut -d: -f3)
+        printf "%2d) %s (%s) - %s\n" $((i+1)) "$drive" "$size" "$model"
+    done
+    echo
+    
+    # Get RAID level
+    local raid_level
+    raid_level=$(get_raid_level)
+    
+    # Determine minimum drives required
+    local min_drives
+    case "$raid_level" in
+        "0"|"1"|"linear") min_drives=2 ;;
+        "5") min_drives=3 ;;
+        "6"|"10") min_drives=4 ;;
+    esac
+    
+    if [[ ${#available_drives[@]} -lt $min_drives ]]; then
+        log "ERROR" "RAID $raid_level requires at least $min_drives drives"
+        log "ERROR" "Only ${#available_drives[@]} available drives found"
+        return 1
+    fi
+    
+    # Select drives
+    log "INFO" "Select drives for RAID $raid_level (minimum $min_drives):"
+    local selected_drives=()
+    local drive_indices=()
+    
+    while true; do
+        if [[ ${#selected_drives[@]} -gt 0 ]]; then
+            echo "Selected drives: ${selected_drives[*]}"
+        fi
+        
+        if [[ ${#selected_drives[@]} -ge $min_drives ]]; then
+            read -r -p "Enter drive number (1-${#available_drives[@]}) or 'done' to proceed: " input
+        else
+            read -r -p "Enter drive number (1-${#available_drives[@]}): " input
+        fi
+        
+        if [[ "$input" == "done" ]] && [[ ${#selected_drives[@]} -ge $min_drives ]]; then
+            break
+        elif [[ "$input" =~ ^[0-9]+$ ]] && [[ "$input" -ge 1 ]] && [[ "$input" -le ${#available_drives[@]} ]]; then
+            local idx=$((input-1))
+            local drive_info="${available_drives[$idx]}"
+            local drive
+            drive=$(echo "$drive_info" | cut -d: -f1)
+            
+            # Check if already selected
+            if [[ " ${drive_indices[*]} " =~ [[:space:]]${idx}[[:space:]] ]]; then
+                log "WARNING" "Drive $drive already selected"
+                continue
+            fi
+            
+            # Special check for RAID 10 - must be even number
+            if [[ "$raid_level" == "10" ]] && [[ ${#selected_drives[@]} -ge 4 ]] && [[ $(((${#selected_drives[@]} + 1) % 2)) -ne 0 ]]; then
+                log "WARNING" "RAID 10 requires an even number of drives"
+                continue
+            fi
+            
+            selected_drives+=("$drive")
+            drive_indices+=("$idx")
+            log "INFO" "Added $drive to selection"
+        else
+            if [[ ${#selected_drives[@]} -lt $min_drives ]]; then
+                log "ERROR" "Invalid selection. Need at least $min_drives drives for RAID $raid_level"
+            else
+                log "ERROR" "Invalid input. Enter a number or 'done'"
+            fi
+        fi
+    done
+    
+    # Final validation for RAID 10
+    if [[ "$raid_level" == "10" ]] && [[ $((${#selected_drives[@]} % 2)) -ne 0 ]]; then
+        log "ERROR" "RAID 10 requires an even number of drives. Selected: ${#selected_drives[@]}"
+        return 1
+    fi
+    
+    # Show summary and confirm
+    echo
+    log "INFO" "RAID Configuration Summary:"
+    log "INFO" "  RAID Level: $raid_level"
+    log "INFO" "  Number of drives: ${#selected_drives[@]}"
+    log "INFO" "  Drives: ${selected_drives[*]}"
+    echo
+    log "WARNING" "This will DESTROY all data on the selected drives!"
+    
+    if [[ "$FORCE" != "true" ]]; then
+        read -r -p "Type 'YES' to confirm: " confirmation
+        if [[ "$confirmation" != "YES" ]]; then
+            log "INFO" "Operation cancelled"
+            return 1
+        fi
+    fi
+    
+    # Create the RAID array
+    cmd_create "$raid_level" "${selected_drives[@]}"
+}
+
+# Interactive RAID removal
+interactive_remove_raid() {
+    log "INFO" "=== Remove RAID Array ==="
+    
+    # Check for existing arrays
+    if [[ ! -f /proc/mdstat ]] || ! grep -q "^md" /proc/mdstat 2>/dev/null; then
+        log "INFO" "No RAID arrays found to remove"
+        return 0
+    fi
+    
+    # Get list of arrays
+    local arrays=()
+    local array_info=()
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^(md[0-9]+) ]]; then
+            local array_name="/dev/${BASH_REMATCH[1]}"
+            arrays+=("$array_name")
+            
+            # Get additional info if possible
+            local info=""
+            if command -v mdadm >/dev/null 2>&1; then
+                info=$(mdadm --detail "$array_name" 2>/dev/null | grep -E "(RAID Level|Array Size)" | tr '\n' ' ' || echo "")
+            fi
+            array_info+=("$info")
+        fi
+    done < /proc/mdstat
+    
+    if [[ ${#arrays[@]} -eq 0 ]]; then
+        log "INFO" "No RAID arrays found"
+        return 0
+    fi
+    
+    # Show current arrays
+    log "INFO" "Current RAID arrays:"
+    for i in "${!arrays[@]}"; do
+        printf "%2d) %s %s\n" $((i+1)) "${arrays[$i]}" "${array_info[$i]}"
+    done
+    echo
+    printf "%2d) Remove ALL arrays\n" $((${#arrays[@]}+1))
+    echo
+    
+    # Get selection
+    local choice
+    while true; do
+        read -r -p "Select array to remove (1-$((${#arrays[@]}+1))): " choice
+        if [[ "$choice" =~ ^[0-9]+$ ]] && [[ "$choice" -ge 1 ]] && [[ "$choice" -le $((${#arrays[@]}+1)) ]]; then
+            break
+        else
+            log "ERROR" "Invalid choice. Please select 1-$((${#arrays[@]}+1))"
+        fi
+    done
+    
+    if [[ "$choice" -eq $((${#arrays[@]}+1)) ]]; then
+        # Remove all arrays
+        cmd_clear_all
+    else
+        # Remove specific array
+        local array_to_remove="${arrays[$((choice-1))]}"
+        cmd_clear_single "$array_to_remove"
+    fi
+}
+
+# Check if a drive can be mirrored
+check_mirror_capability() {
+    local drive="$1"
+    
+    if [[ -z "$drive" ]]; then
+        log "ERROR" "No drive specified"
+        return 1
+    fi
+    
+    # Check if drive exists
+    if [[ ! -b "$drive" ]]; then
+        log "ERROR" "Drive $drive does not exist"
+        return 1
+    fi
+    
+    # Check current status
+    local status=""
+    if mount | grep -q "^$drive"; then
+        status="MOUNTED"
+    elif grep -q "$(basename "$drive")" /proc/mdstat 2>/dev/null; then
+        status="IN_RAID"
+        # Get RAID details
+        local md_device
+        md_device=$(grep -l "$(basename "$drive")" /sys/block/md*/md/raid_disks 2>/dev/null | head -1)
+        if [[ -n "$md_device" ]]; then
+            local array_name raid_level
+            array_name="/dev/$(basename "$(dirname "$(dirname "$md_device")")")"
+            raid_level=$(cat "$(dirname "$md_device")/level" 2>/dev/null || echo "unknown")
+            log "INFO" "Drive $drive is part of $array_name (RAID $raid_level)"
+        fi
+    elif command -v pvdisplay >/dev/null 2>&1 && pvdisplay 2>/dev/null | grep -q "$drive"; then
+        status="IN_LVM"
+    else
+        status="AVAILABLE"
+    fi
+    
+    log "INFO" "Drive $drive status: $status"
+    
+    case "$status" in
+        "AVAILABLE")
+            log "INFO" "✅ Drive can be used for new RAID array"
+            return 0
+            ;;
+        "IN_RAID")
+            log "INFO" "⚠️  Drive is already in a RAID array"
+            log "INFO" "   To mirror this, you would need to convert/migrate the existing array"
+            return 1
+            ;;
+        "MOUNTED")
+            log "INFO" "⚠️  Drive is mounted and in use"
+            log "INFO" "   To mirror this, you would need to:"
+            log "INFO" "   1. Backup the data"
+            log "INFO" "   2. Unmount the drive"
+            log "INFO" "   3. Create a RAID 1 array"
+            log "INFO" "   4. Restore the data"
+            return 1
+            ;;
+        "IN_LVM")
+            log "INFO" "⚠️  Drive is part of LVM"
+            log "INFO" "   LVM can provide mirroring functionality"
+            return 1
+            ;;
+    esac
+}
+
+# Quick mirror setup for system drive
+quick_mirror_setup() {
+    log "INFO" "=== Quick System Drive Mirroring Setup ==="
+    log "WARNING" "This is for reference only - actual system drive mirroring"
+    log "WARNING" "requires careful planning and usually involves:"
+    log "WARNING" "1. Backing up all data first"
+    log "WARNING" "2. Using specialized tools or procedures"
+    log "WARNING" "3. Potentially reinstalling the system"
+    echo
+    
+    # Show current root filesystem
+    local root_device
+    root_device=$(df / | tail -1 | awk '{print $1}')
+    log "INFO" "Current root filesystem: $root_device"
+    
+    # Check what type of device this is
+    if [[ "$root_device" =~ /dev/md ]]; then
+        log "INFO" "✅ Root is already on RAID device: $root_device"
+        mdadm --detail "$root_device" 2>/dev/null || log "WARNING" "Could not get RAID details"
+    elif [[ "$root_device" =~ /dev/mapper/ ]]; then
+        log "INFO" "Root is on LVM device: $root_device"
+        log "INFO" "Consider using LVM mirroring instead of mdadm"
+    else
+        log "INFO" "Root is on regular partition: $root_device"
+        local base_device
+        base_device="${root_device%[0-9]*}"
+        log "INFO" "Base device: $base_device"
+        
+        log "INFO" "To mirror the system drive, you would typically:"
+        log "INFO" "1. Add a second drive of equal or larger size"
+        log "INFO" "2. Create a degraded RAID 1 array on the new drive"
+        log "INFO" "3. Copy the system to the RAID array"
+        log "INFO" "4. Update bootloader and fstab"
+        log "INFO" "5. Add the original drive to complete the mirror"
+        log "INFO" "⚠️  This process is complex and risky - consider professional assistance"
+    fi
+}
+
 # Main menu
 main_menu() {
     while true; do
@@ -425,21 +730,23 @@ main_menu() {
         echo "2) Create new RAID array"
         echo "3) Stop/remove RAID array"
         echo "4) Show drive information"
-        echo "5) Exit"
+        echo "5) Check drive mirror capability"
+        echo "6) System drive mirroring guide"
+        echo "7) Exit"
         echo
         
         local choice
-        read -r -p "Select option (1-5): " choice
+        read -r -p "Select option (1-7): " choice
         
         case $choice in
             1)
                 show_raid_status
                 ;;
             2)
-                log "INFO" "RAID creation functionality - implement as needed"
+                interactive_create_raid
                 ;;
             3)
-                log "INFO" "RAID stop functionality - implement as needed"
+                interactive_remove_raid
                 ;;
             4)
                 log "INFO" "=== Drive Information ==="
@@ -455,6 +762,18 @@ main_menu() {
                 fi
                 ;;
             5)
+                echo
+                read -r -p "Enter drive path (e.g., /dev/sda, /dev/nvme0n1): " drive_path
+                if [[ -n "$drive_path" ]]; then
+                    check_mirror_capability "$drive_path"
+                else
+                    log "ERROR" "No drive path provided"
+                fi
+                ;;
+            6)
+                quick_mirror_setup
+                ;;
+            7)
                 log "INFO" "Exiting"
                 exit 0
                 ;;
