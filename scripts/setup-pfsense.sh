@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-readonly SCRIPT_DIR
+SCRIPT_DIR
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Source common functions
@@ -15,15 +15,15 @@ source "$SCRIPT_DIR/lib/common.sh"
 load_env "$SCRIPT_DIR/.env"
 
 # pfSense configuration constants
-readonly PFSENSE_ISO_URL="https://atxfiles.netgate.com/mirror/downloads/pfSense-CE-2.7.2-RELEASE-amd64.iso.gz"
-readonly PFSENSE_ISO_PATH="/var/lib/vz/template/iso/pfSense-CE-2.7.2-RELEASE-amd64.iso"
-readonly PFSENSE_VM_ID="${PFSENSE_VM_ID:-100}"
-readonly PFSENSE_CPU_CORES="${PFSENSE_CPU_CORES:-2}"
-readonly PFSENSE_MEMORY="${PFSENSE_MEMORY:-2048}"
-readonly PFSENSE_DISK_SIZE="${PFSENSE_DISK_SIZE:-8}"
+PFSENSE_ISO_URL="https://atxfiles.netgate.com/mirror/downloads/pfSense-CE-2.7.2-RELEASE-amd64.iso.gz"
+PFSENSE_ISO_PATH="/var/lib/vz/template/iso/pfSense-CE-2.7.2-RELEASE-amd64.iso"
+PFSENSE_VM_ID="${PFSENSE_VM_ID:-100}"
+PFSENSE_CPU_CORES="${PFSENSE_CPU_CORES:-2}"
+PFSENSE_MEMORY="${PFSENSE_MEMORY:-2048}"
+PFSENSE_DISK_SIZE="${PFSENSE_DISK_SIZE:-8}"
 PFSENSE_WAN_IP="${PFSENSE_WAN_IP:-}"
-readonly PFSENSE_LAN_IP="${PFSENSE_LAN_IP:-192.168.1.1}"
-readonly PFSENSE_DMZ_IP="${PFSENSE_DMZ_IP:-10.0.2.1}"
+PFSENSE_LAN_IP="${PFSENSE_LAN_IP:-192.168.1.1}"
+PFSENSE_DMZ_IP="${PFSENSE_DMZ_IP:-10.0.2.1}"
 
 # Validate prerequisites
 validate_prerequisites() {

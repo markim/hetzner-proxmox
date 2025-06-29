@@ -6,7 +6,7 @@
 set -euo pipefail
 
 # Get script directory
-readonly SCRIPT_DIR
+SCRIPT_DIR
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Source common functions

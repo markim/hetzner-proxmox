@@ -6,7 +6,7 @@
 
 set -euo pipefail
 
-readonly SCRIPT_DIR
+SCRIPT_DIR
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Source common functions
@@ -16,13 +16,13 @@ source "$SCRIPT_DIR/lib/common.sh"
 load_env "$SCRIPT_DIR/.env"
 
 # Firewall Admin VM configuration constants
-readonly VM_ISO_URL="https://distro.ibiblio.org/puppylinux/puppy-bookwormpup/BookwormPup64/10.0.11/BookwormPup64_10.0.11.iso"
-readonly VM_ISO_PATH="/var/lib/vz/template/iso/BookwormPup64_10.0.11.iso"
-readonly FIREWALL_ADMIN_VM_ID="${FIREWALL_ADMIN_VM_ID:-200}"
-readonly FIREWALL_ADMIN_HOSTNAME="${FIREWALL_ADMIN_HOSTNAME:-firewall-admin}"
-readonly FIREWALL_ADMIN_MEMORY="${FIREWALL_ADMIN_MEMORY:-1024}"
-readonly FIREWALL_ADMIN_CORES="${FIREWALL_ADMIN_CORES:-1}"
-readonly FIREWALL_ADMIN_DISK_SIZE="${FIREWALL_ADMIN_DISK_SIZE:-8}"
+VM_ISO_URL="https://distro.ibiblio.org/puppylinux/puppy-bookwormpup/BookwormPup64/10.0.11/BookwormPup64_10.0.11.iso"
+VM_ISO_PATH="/var/lib/vz/template/iso/BookwormPup64_10.0.11.iso"
+FIREWALL_ADMIN_VM_ID="${FIREWALL_ADMIN_VM_ID:-200}"
+FIREWALL_ADMIN_HOSTNAME="${FIREWALL_ADMIN_HOSTNAME:-firewall-admin}"
+FIREWALL_ADMIN_MEMORY="${FIREWALL_ADMIN_MEMORY:-1024}"
+FIREWALL_ADMIN_CORES="${FIREWALL_ADMIN_CORES:-1}"
+FIREWALL_ADMIN_DISK_SIZE="${FIREWALL_ADMIN_DISK_SIZE:-8}"
 
 # Validate prerequisites
 validate_prerequisites() {

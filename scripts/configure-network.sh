@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-readonly SCRIPT_DIR
+SCRIPT_DIR
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Source common functions
@@ -15,9 +15,9 @@ source "$SCRIPT_DIR/lib/common.sh"
 load_env "$SCRIPT_DIR/.env"
 
 # Network configuration safety checks
-readonly NETWORK_BACKUP_DIR="/root/network-backups"
-readonly INTERFACES_FILE="/etc/network/interfaces"
-readonly INTERFACES_BACKUP
+NETWORK_BACKUP_DIR="/root/network-backups"
+INTERFACES_FILE="/etc/network/interfaces"
+INTERFACES_BACKUP
 INTERFACES_BACKUP="$NETWORK_BACKUP_DIR/interfaces.backup.$(date +%Y%m%d_%H%M%S)"
 
 # Create backup directory

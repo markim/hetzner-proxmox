@@ -6,15 +6,15 @@
 set -euo pipefail
 
 # Color codes for output
-readonly RED='\033[0;31m'
-readonly GREEN='\033[0;32m'
-readonly YELLOW='\033[1;33m'
-readonly BLUE='\033[0;34m'
-readonly NC='\033[0m' # No Color
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
 
 # Default values
-readonly DEFAULT_LOG_FILE="/var/log/hetzner-proxmox-setup.log"
-readonly DEFAULT_LOG_LEVEL="INFO"
+DEFAULT_LOG_FILE="/var/log/hetzner-proxmox-setup.log"
+DEFAULT_LOG_LEVEL="INFO"
 
 # Load environment variables
 load_env() {

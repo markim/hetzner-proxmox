@@ -14,9 +14,9 @@ error_handler() {
     exit "$error_code"
 }
 
-readonly SCRIPT_DIR
+SCRIPT_DIR
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly PROJECT_ROOT
+PROJECT_ROOT
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
 # Source common functions
