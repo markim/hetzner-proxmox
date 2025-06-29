@@ -216,11 +216,10 @@ analyze_drives() {
     fi
     
     # Display analysis results
-    log "INFO" "Drive analysis results:"
+    log "INFO" "Drive analysis completed:"
     for category in "${!drive_groups[@]}"; do
         local drives_in_category=(${drive_groups[$category]})
         local count=${#drives_in_category[@]}
-        local size_gb=${drive_sizes_gb[$category]}
         log "INFO" "  $category: ${count}x drives (${drive_groups[$category]})"
     done
     
@@ -312,7 +311,7 @@ validate_raid_config() {
                 return 1
             fi
             ;;
-        "mixed-optimal"|"no-raid"|"individual-"*)
+        "mixed-optimal"|"no-raid"|"individual-"*|"scan-only")
             # These configurations don't have strict requirements
             ;;
         *)
@@ -600,9 +599,6 @@ preview_no_raid() {
 
 # Suggest best RAID configuration based on detected drives
 suggest_best_config() {
-    log "INFO" "🔍 Analyzing your detected drives to suggest optimal RAID configuration..."
-    echo
-    
     # Import the drive group data
     eval "$DRIVE_GROUPS_STR"
     eval "$DRIVE_SIZES_STR"
@@ -629,24 +625,8 @@ suggest_best_config() {
         fi
     done
     
-    log "INFO" "📊 Drive Configuration Analysis Results:"
-    log "INFO" "  Total drives detected: $total_drives"
-    log "INFO" "  Drive size groups found: $group_count"
-    log "INFO" "  Largest group: ${largest_group_size}x $largest_group_category"
+    log "INFO" "� Analyzing your drives for optimal RAID configuration..."
     echo
-    
-    # Show detailed breakdown of detected drives
-    log "INFO" "🔍 Detected Drive Groups:"
-    for category in "${!drive_groups[@]}"; do
-        local drives_in_category=(${drive_groups[$category]})
-        local count=${#drives_in_category[@]}
-        local size_gb=${drive_sizes_gb[$category]}
-        log "INFO" "  Group: $category"
-        log "INFO" "    Count: ${count}x drives"
-        log "INFO" "    Size: ~${size_gb}GB each"
-        log "INFO" "    Drives: ${drives_in_category[*]}"
-        echo
-    done
     
     # Recommendation logic based on drive configuration
     if [[ $group_count -eq 1 ]]; then
@@ -740,12 +720,7 @@ suggest_best_config() {
         local rec="${recommendations[$i]}"
         local config_name="${rec%%:*}"
         local description="${rec#*:}"
-        
-        if [[ "$description" =~ ⭐ ]]; then
-            log "INFO" "  $description"
-        else
-            log "INFO" "  $description"
-        fi
+        log "INFO" "  $description"
     done
     
     echo
