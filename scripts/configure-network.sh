@@ -118,12 +118,6 @@ validate_network_config() {
         return 1
     fi
     
-    # Validate additional IPs are in environment
-    if [[ -z "${ADDITIONAL_IPS:-}" ]]; then
-        log "WARN" "No additional IPs defined in environment"
-        return 0
-    fi
-    
     log "INFO" "Network configuration validation passed"
 }
 
@@ -205,40 +199,11 @@ parse_additional_ips() {
             ((i++))
         done
         
-    # Method 3: Fallback to legacy format
-    elif [[ -n "${ADDITIONAL_IPS:-}" ]]; then
-        log "INFO" "Loading additional IPs from legacy ADDITIONAL_IPS format"
-        log "WARN" "Consider migrating to config file or structured env vars for better maintainability"
-        
-        # Parse the legacy configuration format
-        IFS=',' read -ra IP_CONFIGS <<< "$ADDITIONAL_IPS"
-        
-        for config in "${IP_CONFIGS[@]}"; do
-            # Split by colon, but handle MAC addresses (which have 6 parts separated by colons)
-            IFS=':' read -ra PARTS <<< "$config"
-            
-            # We expect: IP, MAC (6 parts), GATEWAY, NETMASK = 9 total parts
-            if [[ ${#PARTS[@]} -eq 9 ]]; then
-                # Reconstruct MAC address from parts 1-6
-                local mac="${PARTS[1]}:${PARTS[2]}:${PARTS[3]}:${PARTS[4]}:${PARTS[5]}:${PARTS[6]}"
-                
-                ips_array+=("${PARTS[0]}")
-                macs_array+=("$mac")
-                gateways_array+=("${PARTS[7]}")
-                netmasks_array+=("${PARTS[8]}")
-                
-                log "DEBUG" "Parsed legacy format: IP=${PARTS[0]}, MAC=$mac, Gateway=${PARTS[7]}, Netmask=${PARTS[8]}"
-            else
-                log "WARN" "Invalid legacy IP configuration format: $config"
-                log "WARN" "Expected format: IP:MAC:GATEWAY:NETMASK (got ${#PARTS[@]} parts, expected 9)"
-            fi
-        done
     else
         log "INFO" "No additional IPs to configure"
         log "INFO" "Configure using one of these methods:"
         log "INFO" "  1. Create config file: $config_file"
         log "INFO" "  2. Set environment variables: ADDITIONAL_IP_1, ADDITIONAL_GATEWAY_1, etc."
-        log "INFO" "  3. Use legacy ADDITIONAL_IPS format"
         return 0
     fi
     
@@ -1001,7 +966,7 @@ OPTIONS:
     --help, -h           Show this help message
 
 ENVIRONMENT:
-    The script supports multiple methods to configure additional IPs:
+    The script supports two methods to configure additional IPs:
     
     METHOD 1 - Config File (Recommended):
     Create config/additional-ips.conf with one IP per line:
@@ -1023,9 +988,6 @@ ENVIRONMENT:
     ADDITIONAL_MAC_2=00:50:56:00:01:03
     ADDITIONAL_GATEWAY_2=203.0.113.1
     ADDITIONAL_NETMASK_2=255.255.255.192
-    
-    METHOD 3 - Legacy Format (Not Recommended):
-    ADDITIONAL_IPS="IP:MAC:GATEWAY:NETMASK,IP:MAC:GATEWAY:NETMASK"
     
     Note: MAC addresses are optional and can be omitted.
 

@@ -66,7 +66,6 @@ check_mac_configuration() {
         echo "Please configure additional IPs in one of these ways:"
         echo "1. Create config/additional-ips.conf"
         echo "2. Set ADDITIONAL_IP_1, ADDITIONAL_MAC_1, etc. in .env"
-        echo "3. Set ADDITIONAL_IPS in .env (legacy format)"
         return 1
     fi
     
@@ -130,9 +129,6 @@ ADDITIONAL_IP_2=203.0.113.11
 ADDITIONAL_MAC_2=00:50:56:00:01:03
 ADDITIONAL_GATEWAY_2=203.0.113.1
 ADDITIONAL_NETMASK_2=255.255.255.192
-
-Method 3 - Legacy format (.env):
-ADDITIONAL_IPS=203.0.113.10:00:50:56:00:01:02:203.0.113.1:255.255.255.192,203.0.113.11:00:50:56:00:01:03:203.0.113.1:255.255.255.192
 
 EOF
 }

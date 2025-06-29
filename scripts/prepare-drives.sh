@@ -29,6 +29,7 @@ source "$PROJECT_ROOT/lib/common.sh"
 DRY_RUN=false
 RAID_CONFIG=""
 FORCE=false
+CLEANUP_ONLY=false
 
 # RAID configuration options (will be dynamically populated)
 declare -A RAID_CONFIGS=(
@@ -48,6 +49,7 @@ OPTIONS:
     -c, --config CONFIG     RAID configuration to apply
     -d, --dry-run          Show what would be done without executing
     -f, --force            Force operations without confirmation
+    --cleanup              Clean up existing RAID and exit (use this first)
     -h, --help             Show this help message
     -v, --verbose          Enable verbose logging
 
@@ -94,6 +96,10 @@ parse_args() {
                 ;;
             -f|--force)
                 FORCE=true
+                shift
+                ;;
+            --cleanup)
+                CLEANUP_ONLY=true
                 shift
                 ;;
             -h|--help)
@@ -218,31 +224,9 @@ analyze_drives() {
         log "INFO" "  $category: ${count}x drives (${drive_groups[$category]})"
     done
     
-    # Store results globally for compatibility and recommendations
+    # Store results globally for use in other functions
     export DRIVE_GROUPS_STR=$(declare -p drive_groups 2>/dev/null || echo "declare -A drive_groups=()")
     export DRIVE_SIZES_STR=$(declare -p drive_sizes_gb 2>/dev/null || echo "declare -A drive_sizes_gb=()")
-    
-    # For backward compatibility, still populate old variables
-    local drive_4tb=()
-    local drive_1tb=()
-    local drive_other=()
-    
-    for drive in "${drives[@]}"; do
-        local size_bytes=$(lsblk -dn -b -o SIZE "$drive")
-        local size_gb=$((size_bytes / 1024 / 1024 / 1024))
-        
-        if [[ $size_gb -gt 3500 && $size_gb -lt 4500 ]]; then
-            drive_4tb+=("$drive")
-        elif [[ $size_gb -gt 800 && $size_gb -lt 1200 ]]; then
-            drive_1tb+=("$drive")
-        else
-            drive_other+=("$drive")
-        fi
-    done
-    
-    DRIVES_4TB=("${drive_4tb[@]}")
-    DRIVES_1TB=("${drive_1tb[@]}")
-    DRIVES_OTHER=("${drive_other[@]}")
 }
 
 # Validate RAID configuration
@@ -330,15 +314,6 @@ validate_raid_config() {
             ;;
         "mixed-optimal"|"no-raid"|"individual-"*)
             # These configurations don't have strict requirements
-            ;;
-        # Legacy configurations for backward compatibility
-        "single-raid1-4tb"|"single-raid1-1tb"|"raid6-all"|"zfs-mirror")
-            # Use old validation logic
-            if [[ ${#DRIVES_4TB[@]} -lt 2 && ${#DRIVES_1TB[@]} -lt 2 ]] && [[ "$config" != "no-raid" ]]; then
-                log "ERROR" "Legacy configuration $config requires specific drive sizes"
-                log "ERROR" "Consider using the generic configurations instead"
-                return 1
-            fi
             ;;
         *)
             # Check if it's a valid configuration
@@ -490,13 +465,9 @@ preview_raid_config() {
         "no-raid")
             preview_no_raid
             ;;
-        # Legacy configurations
-        "single-raid1-4tb"|"single-raid1-1tb"|"raid6-all"|"zfs-mirror")
-            preview_legacy_config "$config"
-            ;;
         *)
             log "WARNING" "Unknown configuration: $config"
-            log "INFO" "Will attempt generic configuration"
+            log "INFO" "Will attempt to execute as generic configuration"
             ;;
     esac
     
@@ -625,17 +596,6 @@ preview_no_raid() {
     done
     
     log "INFO" "  ⚠️  No redundancy - drive failure will result in data loss"
-}
-
-preview_legacy_config() {
-    local config="$1"
-    
-    # Use the old preview logic for backward compatibility
-    case "$config" in
-        "single-raid1-4tb"|"single-raid1-1tb"|"raid6-all"|"zfs-mirror")
-            log "INFO" "Legacy configuration - see original preview logic"
-            ;;
-    esac
 }
 
 # Suggest best RAID configuration based on detected drives
@@ -836,6 +796,9 @@ execute_raid_config() {
     
     log "INFO" "Executing RAID configuration: $config"
     
+    # Clean up any existing RAID configuration first
+    cleanup_existing_raid
+    
     # Install required packages
     log "INFO" "Installing required packages..."
     apt update
@@ -845,23 +808,33 @@ execute_raid_config() {
         "dual-raid1")
             execute_dual_raid1
             ;;
-        "single-raid1-4tb")
-            execute_single_raid1_4tb
+        "raid1-"*)
+            execute_single_raid1 "$config"
             ;;
-        "single-raid1-1tb")
-            execute_single_raid1_1tb
+        "raid5-"*)
+            execute_raid5 "$config"
             ;;
-        "raid6-all")
-            execute_raid6_all
+        "raid6-"*)
+            execute_raid6 "$config"
             ;;
-        "zfs-mirror")
-            execute_zfs_mirror
+        "raid10-"*)
+            execute_raid10 "$config"
+            ;;
+        "zfs-"*)
+            execute_zfs_mirror "$config"
+            ;;
+        "individual-"*)
+            execute_individual "$config"
+            ;;
+        "mixed-optimal")
+            execute_mixed_optimal
             ;;
         "no-raid")
             execute_no_raid
             ;;
         *)
             log "ERROR" "Unknown configuration: $config"
+            log "ERROR" "Use --help to see available configurations"
             exit 1
             ;;
     esac
@@ -876,29 +849,100 @@ execute_raid_config() {
 execute_dual_raid1() {
     log "INFO" "Setting up dual RAID 1 configuration..."
     
-    # Wipe drives
+    # Import drive group data and determine which drives to use
+    eval "$DRIVE_GROUPS_STR"
+    eval "$DRIVE_SIZES_STR"
+    
+    # Find the two drive groups
+    local categories=(${!drive_groups[@]})
+    local large_drives small_drives
+    
+    if [[ ${#categories[@]} -ne 2 ]]; then
+        log "ERROR" "Dual RAID 1 requires exactly 2 drive size groups, found ${#categories[@]}"
+        exit 1
+    fi
+    
+    # Determine which group is larger
+    local cat1="${categories[0]}"
+    local cat2="${categories[1]}"
+    local size1=${drive_sizes_gb[$cat1]}
+    local size2=${drive_sizes_gb[$cat2]}
+    
+    if [[ $size1 -gt $size2 ]]; then
+        large_drives=(${drive_groups[$cat1]})
+        small_drives=(${drive_groups[$cat2]})
+        log "INFO" "Large drives ($cat1): ${large_drives[*]}"
+        log "INFO" "Small drives ($cat2): ${small_drives[*]}"
+    else
+        large_drives=(${drive_groups[$cat2]})
+        small_drives=(${drive_groups[$cat1]})
+        log "INFO" "Large drives ($cat2): ${large_drives[*]}"
+        log "INFO" "Small drives ($cat1): ${small_drives[*]}"
+    fi
+    
+    # Stop any existing RAID arrays first
+    log "INFO" "Stopping any existing RAID arrays..."
+    if [[ -f /proc/mdstat ]]; then
+        for md in /dev/md*; do
+            if [[ -b "$md" ]]; then
+                mdadm --stop "$md" 2>/dev/null || true
+            fi
+        done
+    fi
+    
+    # Wait a moment for arrays to stop
+    sleep 2
+    
+    # Wipe drive signatures on all drives
     log "INFO" "Wiping drive signatures..."
-    for drive in "${DRIVES_4TB[@]:0:2}" "${DRIVES_1TB[@]:0:2}"; do
-        wipefs -fa "$drive"
-        dd if=/dev/zero of="$drive" bs=1M count=100
+    for drive in "${large_drives[@]:0:2}" "${small_drives[@]:0:2}"; do
+        log "INFO" "  Wiping $drive..."
+        wipefs -fa "$drive" 2>/dev/null || true
+        dd if=/dev/zero of="$drive" bs=1M count=100 2>/dev/null || true
+        # Remove any existing mdadm metadata
+        mdadm --zero-superblock "$drive" 2>/dev/null || true
     done
     
-    # Create RAID 1 for 1TB drives (system)
-    log "INFO" "Creating RAID 1 for system storage (1TB drives)..."
-    mdadm --create /dev/md0 --level=1 --raid-devices=2 "${DRIVES_1TB[0]}" "${DRIVES_1TB[1]}"
+    # Wait for devices to settle
+    sleep 3
     
-    # Create RAID 1 for 4TB drives (VM storage)
-    log "INFO" "Creating RAID 1 for VM storage (4TB drives)..."
-    mdadm --create /dev/md1 --level=1 --raid-devices=2 "${DRIVES_4TB[0]}" "${DRIVES_4TB[1]}"
+    # Create RAID 1 for small drives (system)
+    log "INFO" "Creating RAID 1 for system storage (smaller drives)..."
+    log "INFO" "  Using drives: ${small_drives[0]} ${small_drives[1]}"
+    if ! mdadm --create /dev/md0 --level=1 --raid-devices=2 --metadata=1.2 \
+        "${small_drives[0]}" "${small_drives[1]}" --assume-clean; then
+        log "ERROR" "Failed to create RAID 1 for small drives"
+        exit 1
+    fi
     
-    # Wait for RAID sync to start
+    # Create RAID 1 for large drives (VM storage)  
+    log "INFO" "Creating RAID 1 for VM storage (larger drives)..."
+    log "INFO" "  Using drives: ${large_drives[0]} ${large_drives[1]}"
+    if ! mdadm --create /dev/md1 --level=1 --raid-devices=2 --metadata=1.2 \
+        "${large_drives[0]}" "${large_drives[1]}" --assume-clean; then
+        log "ERROR" "Failed to create RAID 1 for large drives"
+        exit 1
+    fi
+    
+    # Wait for RAID arrays to be ready
+    log "INFO" "Waiting for RAID arrays to be ready..."
     sleep 5
     
-    # Partition system RAID
-    log "INFO" "Partitioning system RAID..."
+    # Check RAID status
+    if [[ -f /proc/mdstat ]]; then
+        log "INFO" "Current RAID status:"
+        cat /proc/mdstat
+    fi
+    
+    # Partition system RAID (md0 - smaller drives)
+    log "INFO" "Partitioning system RAID (md0)..."
     parted -s /dev/md0 mklabel gpt
     parted -s /dev/md0 mkpart primary ext4 1MiB 1GiB
     parted -s /dev/md0 mkpart primary ext4 1GiB 100%
+    
+    # Wait for partitions to be recognized
+    sleep 2
+    partprobe /dev/md0
     
     # Create LVM on system RAID
     log "INFO" "Setting up LVM on system RAID..."
@@ -908,7 +952,7 @@ execute_dual_raid1() {
     lvcreate -L 16G -n swap vg0
     lvcreate -L 20G -n tmp vg0
     
-    # Create LVM on VM RAID
+    # Create LVM on VM RAID (md1 - larger drives)
     log "INFO" "Setting up LVM on VM RAID..."
     pvcreate /dev/md1
     vgcreate vg1 /dev/md1
@@ -916,30 +960,56 @@ execute_dual_raid1() {
     
     # Format filesystems
     log "INFO" "Formatting filesystems..."
-    mkfs.ext4 /dev/md0p1  # boot
-    mkfs.ext4 /dev/vg0/root
+    mkfs.ext4 -F /dev/md0p1  # boot
+    mkfs.ext4 -F /dev/vg0/root
     mkswap /dev/vg0/swap
-    mkfs.ext4 /dev/vg0/tmp
-    mkfs.ext4 /dev/vg1/vmdata
+    mkfs.ext4 -F /dev/vg0/tmp
+    mkfs.ext4 -F /dev/vg1/vmdata
     
     # Create mount points and update fstab
     setup_dual_raid1_mounts
 }
 
 # Execute single RAID 1 (4TB) configuration
-execute_single_raid1_4tb() {
-    log "INFO" "Setting up single RAID 1 configuration (4TB drives)..."
+execute_single_raid1() {
+    local config="$1"
+    local category="${config#raid1-}"
+    
+    log "INFO" "Setting up RAID 1 configuration for $category drives..."
+    
+    # Import drive group data
+    eval "$DRIVE_GROUPS_STR"
+    eval "$DRIVE_SIZES_STR"
+    
+    # Get drives for this category
+    if [[ -z "${drive_groups[$category]:-}" ]]; then
+        log "ERROR" "No drives found for category: $category"
+        return 1
+    fi
+    
+    local drives_in_category=(${drive_groups[$category]})
+    local size=${drive_sizes_gb[$category]}
+    
+    if [[ ${#drives_in_category[@]} -lt 2 ]]; then
+        log "ERROR" "Need at least 2 drives for RAID 1, found ${#drives_in_category[@]} in category $category"
+        return 1
+    fi
+    
+    # Use first two drives
+    local selected_drives=("${drives_in_category[@]:0:2}")
+    
+    log "INFO" "Using drives: ${selected_drives[*]} (${size}GB each)"
     
     # Wipe drives
     log "INFO" "Wiping drive signatures..."
-    for drive in "${DRIVES_4TB[@]:0:2}"; do
+    for drive in "${selected_drives[@]}"; do
         wipefs -fa "$drive"
         dd if=/dev/zero of="$drive" bs=1M count=100
     done
     
     # Create RAID 1
     log "INFO" "Creating RAID 1 array..."
-    mdadm --create /dev/md0 --level=1 --raid-devices=2 "${DRIVES_4TB[0]}" "${DRIVES_4TB[1]}"
+    mdadm --create /dev/md0 --level=1 --raid-devices=2 "${selected_drives[0]}" "${selected_drives[1]}"
     
     # Wait for RAID sync to start
     sleep 5
@@ -1015,90 +1085,417 @@ EOF
     log "INFO" "Mount points configured. Manual mounting required for initial setup."
 }
 
+# Clean up existing RAID configuration
+cleanup_existing_raid() {
+    log "INFO" "Cleaning up existing RAID configuration..."
+    
+    # Stop all MD arrays
+    if [[ -f /proc/mdstat ]]; then
+        log "INFO" "Stopping existing RAID arrays..."
+        for md_device in $(grep "^md" /proc/mdstat | cut -d: -f1); do
+            log "INFO" "  Stopping /dev/$md_device"
+            mdadm --stop "/dev/$md_device" 2>/dev/null || true
+        done
+    fi
+    
+    # Remove any existing LVM configuration on affected drives
+    log "INFO" "Removing LVM configuration..."
+    for vg in vg0 vg1; do
+        if vgdisplay "$vg" >/dev/null 2>&1; then
+            log "INFO" "  Removing volume group: $vg"
+            vgremove -f "$vg" 2>/dev/null || true
+        fi
+    done
+    
+    # Remove physical volumes (check all possible drive types)
+    for pattern in "/dev/nvme*n*p*" "/dev/sd*[0-9]*" "/dev/vd*[0-9]*"; do
+        for drive in $pattern; do
+            if [[ -b "$drive" ]] && pvdisplay "$drive" >/dev/null 2>&1; then
+                log "INFO" "  Removing physical volume: $drive"
+                pvremove -f "$drive" 2>/dev/null || true
+            fi
+        done
+    done
+    
+    # Clean up all drive partitions and metadata (check all drive types)
+    for pattern in "/dev/nvme*n*" "/dev/sd*" "/dev/vd*"; do
+        for drive in $pattern; do
+            if [[ -b "$drive" ]]; then
+                # Skip if it's a partition (contains numbers at the end)
+                if [[ "$drive" =~ [0-9]+$ ]]; then
+                    continue
+                fi
+                
+                log "INFO" "  Cleaning drive: $drive"
+                # Remove RAID metadata
+                mdadm --zero-superblock "$drive" 2>/dev/null || true
+                # Remove partition table
+                wipefs -fa "$drive" 2>/dev/null || true
+                # Clear first 100MB
+                dd if=/dev/zero of="$drive" bs=1M count=100 2>/dev/null || true
+            fi
+        done
+    done
+    
+    # Wait for system to settle
+    sleep 3
+    
+    log "INFO" "Cleanup completed"
+}
+
 # Execute ZFS mirror configuration
 execute_zfs_mirror() {
-    log "INFO" "Setting up ZFS mirror configuration..."
+    local config="$1"
+    local category="${config#zfs-}"
+    
+    log "INFO" "Setting up ZFS mirror configuration for $category drives..."
+    
+    # Import drive group data
+    eval "$DRIVE_GROUPS_STR"
+    eval "$DRIVE_SIZES_STR"
     
     # Install ZFS
     log "INFO" "Installing ZFS packages..."
     apt update
     apt install -y zfsutils-linux
     
-    # Wipe drives
-    log "INFO" "Wiping drive signatures..."
-    for drive in "${DRIVES_4TB[@]:0:2}"; do
-        wipefs -fa "$drive"
-        dd if=/dev/zero of="$drive" bs=1M count=100
-    done
-    
-    if [[ ${#DRIVES_1TB[@]} -ge 2 ]]; then
-        for drive in "${DRIVES_1TB[@]:0:2}"; do
-            wipefs -fa "$drive"
-            dd if=/dev/zero of="$drive" bs=1M count=100
-        done
+    # Get drives for this category
+    if [[ -z "${drive_groups[$category]:-}" ]]; then
+        log "ERROR" "No drives found for category: $category"
+        return 1
     fi
     
-    # Create ZFS pools
-    if [[ ${#DRIVES_4TB[@]} -ge 2 ]]; then
-        log "INFO" "Creating ZFS pool 'tank' with 4TB drives..."
-        zpool create -f tank mirror "${DRIVES_4TB[0]}" "${DRIVES_4TB[1]}"
-        
-        # Create datasets
-        zfs create tank/vms
-        zfs create tank/backup
-        zfs create tank/iso
-        
-        # Set properties
-        zfs set compression=lz4 tank
-        zfs set atime=off tank
+    local drives_in_category=(${drive_groups[$category]})
+    local size=${drive_sizes_gb[$category]}
+    
+    if [[ ${#drives_in_category[@]} -lt 2 ]]; then
+        log "ERROR" "Need at least 2 drives for ZFS mirror, found ${#drives_in_category[@]} in category $category"
+        return 1
     fi
     
-    if [[ ${#DRIVES_1TB[@]} -ge 2 ]]; then
-        log "INFO" "Creating ZFS pool 'system' with 1TB drives..."
-        zpool create -f system mirror "${DRIVES_1TB[0]}" "${DRIVES_1TB[1]}"
-        
-        # Create datasets
-        zfs create system/home
-        zfs create system/logs
-        
-        # Set properties
-        zfs set compression=lz4 system
-        zfs set atime=off system
-    fi
+    # Use first two drives
+    local drive1="${drives_in_category[0]}"
+    local drive2="${drives_in_category[1]}"
+    
+    log "INFO" "Using drives: $drive1 and $drive2 (${size}GB each)"
+    
+    log "INFO" "Wiping drives $drive1 and $drive2..."
+    wipefs -fa "$drive1"
+    dd if=/dev/zero of="$drive1" bs=1M count=100
+    wipefs -fa "$drive2"
+    dd if=/dev/zero of="$drive2" bs=1M count=100
+    
+    # Create ZFS pool
+    local pool_name="tank"
+    log "INFO" "Creating ZFS pool '$pool_name' with ${size}GB drives..."
+    zpool create -f "$pool_name" mirror "$drive1" "$drive2"
+    
+    # Create datasets
+    zfs create "$pool_name/vms"
+    zfs create "$pool_name/backup"
+    zfs create "$pool_name/iso"
+    
+    # Set properties
+    zfs set compression=lz4 "$pool_name"
+    zfs set atime=off "$pool_name"
     
     # Setup ZFS mounts
     setup_zfs_mounts
 }
 
 # Execute RAID 6 configuration
-execute_raid6_all() {
-    log "INFO" "Setting up RAID 6 configuration with all drives..."
-    log "WARNING" "This will significantly underutilize your 4TB drives!"
+execute_raid6() {
+    local config="$1"
+    local category="${config#raid6-}"
     
-    local all_drives=("${DRIVES_4TB[@]}" "${DRIVES_1TB[@]}" "${DRIVES_OTHER[@]}")
+    log "INFO" "Setting up RAID 6 configuration for $category drives..."
+    
+    # Import drive group data
+    eval "$DRIVE_GROUPS_STR"
+    eval "$DRIVE_SIZES_STR"
+    
+    # Get drives for this category
+    if [[ -z "${drive_groups[$category]:-}" ]]; then
+        log "ERROR" "No drives found for category: $category"
+        return 1
+    fi
+    
+    local drives_in_category=(${drive_groups[$category]})
+    local size=${drive_sizes_gb[$category]}
+    
+    if [[ ${#drives_in_category[@]} -lt 4 ]]; then
+        log "ERROR" "RAID 6 requires at least 4 drives, found ${#drives_in_category[@]} in category $category"
+        return 1
+    fi
+    
+    log "INFO" "Using ${#drives_in_category[@]} drives for RAID 6: ${drives_in_category[*]}"
     
     # Wipe drives
     log "INFO" "Wiping drive signatures..."
-    for drive in "${all_drives[@]}"; do
+    for drive in "${drives_in_category[@]}"; do
         wipefs -fa "$drive"
         dd if=/dev/zero of="$drive" bs=1M count=100
     done
     
     # Create RAID 6
-    log "INFO" "Creating RAID 6 array with all drives..."
-    mdadm --create /dev/md0 --level=6 --raid-devices=${#all_drives[@]} "${all_drives[@]}"
+    log "INFO" "Creating RAID 6 array with ${#drives_in_category[@]} drives..."
+    mdadm --create /dev/md0 --level=6 --raid-devices=${#drives_in_category[@]} "${drives_in_category[@]}"
     
     # Wait for RAID sync to start
     sleep 5
     
+    # Partition and setup LVM (same as RAID 6)
+    setup_standard_raid_partitions
+}
+
+# Execute RAID 5 configuration
+execute_raid5() {
+    local config="$1"
+    local category="${config#raid5-}"
+    
+    log "INFO" "Setting up RAID 5 configuration for $category drives..."
+    
+    # Import drive group data
+    eval "$DRIVE_GROUPS_STR"
+    eval "$DRIVE_SIZES_STR"
+    
+    # Get drives for this category
+    if [[ -z "${drive_groups[$category]:-}" ]]; then
+        log "ERROR" "No drives found for category: $category"
+        return 1
+    fi
+    
+    local drives_in_category=(${drive_groups[$category]})
+    local size=${drive_sizes_gb[$category]}
+    
+    if [[ ${#drives_in_category[@]} -lt 3 ]]; then
+        log "ERROR" "RAID 5 requires at least 3 drives, found ${#drives_in_category[@]} in category $category"
+        return 1
+    fi
+    
+    log "INFO" "Using ${#drives_in_category[@]} drives for RAID 5: ${drives_in_category[*]}"
+    
+    # Wipe drives
+    log "INFO" "Wiping drive signatures..."
+    for drive in "${drives_in_category[@]}"; do
+        wipefs -fa "$drive"
+        dd if=/dev/zero of="$drive" bs=1M count=100
+    done
+    
+    # Create RAID 5
+    log "INFO" "Creating RAID 5 array with ${#drives_in_category[@]} drives..."
+    mdadm --create /dev/md0 --level=5 --raid-devices=${#drives_in_category[@]} "${drives_in_category[@]}"
+    
+    # Wait for RAID sync to start
+    sleep 5
+    
+    # Partition and setup LVM (same as RAID 6)
+    setup_standard_raid_partitions
+}
+
+# Execute RAID 10 configuration
+execute_raid10() {
+    local config="$1"
+    local category="${config#raid10-}"
+    
+    log "INFO" "Setting up RAID 10 configuration for $category drives..."
+    
+    # Import drive group data
+    eval "$DRIVE_GROUPS_STR"
+    eval "$DRIVE_SIZES_STR"
+    
+    # Get drives for this category
+    if [[ -z "${drive_groups[$category]:-}" ]]; then
+        log "ERROR" "No drives found for category: $category"
+        return 1
+    fi
+    
+    local drives_in_category=(${drive_groups[$category]})
+    local size=${drive_sizes_gb[$category]}
+    
+    if [[ ${#drives_in_category[@]} -lt 4 ]]; then
+        log "ERROR" "RAID 10 requires at least 4 drives, found ${#drives_in_category[@]} in category $category"
+        return 1
+    fi
+    
+    if [[ $((${#drives_in_category[@]} % 2)) -ne 0 ]]; then
+        log "ERROR" "RAID 10 requires an even number of drives, found ${#drives_in_category[@]} in category $category"
+        return 1
+    fi
+    
+    log "INFO" "Using ${#drives_in_category[@]} drives for RAID 10: ${drives_in_category[*]}"
+    
+    # Wipe drives
+    log "INFO" "Wiping drive signatures..."
+    for drive in "${drives_in_category[@]}"; do
+        wipefs -fa "$drive"
+        dd if=/dev/zero of="$drive" bs=1M count=100
+    done
+    
+    # Create RAID 10
+    log "INFO" "Creating RAID 10 array with ${#drives_in_category[@]} drives..."
+    mdadm --create /dev/md0 --level=10 --raid-devices=${#drives_in_category[@]} "${drives_in_category[@]}"
+    
+    # Wait for RAID sync to start
+    sleep 5
+    
+    # Partition and setup LVM (same as RAID 6)
+    setup_standard_raid_partitions
+}
+
+# Execute individual drive configuration
+execute_individual() {
+    local config="$1"
+    local category="${config#individual-}"
+    
+    log "INFO" "Setting up individual drives for $category..."
+    
+    # Import drive group data
+    eval "$DRIVE_GROUPS_STR"
+    eval "$DRIVE_SIZES_STR"
+    
+    # Get drives for this category
+    if [[ -z "${drive_groups[$category]:-}" ]]; then
+        log "ERROR" "No drives found for category: $category"
+        return 1
+    fi
+    
+    local drives_in_category=(${drive_groups[$category]})
+    local size=${drive_sizes_gb[$category]}
+    
+    log "INFO" "Setting up ${#drives_in_category[@]} individual drives: ${drives_in_category[*]}"
+    log "WARNING" "No redundancy - drive failure will result in data loss!"
+    
+    local mount_index=0
+    for drive in "${drives_in_category[@]}"; do
+        log "INFO" "Setting up $drive as individual storage..."
+        wipefs -fa "$drive"
+        
+        parted -s "$drive" mklabel gpt
+        parted -s "$drive" mkpart primary ext4 1MiB 100%
+        
+        mkfs.ext4 "${drive}1"
+        
+        # Create mount point
+        mkdir -p "/mnt/storage${mount_index}"
+        echo "${drive}1 /mnt/storage${mount_index} ext4 defaults 0 2" >> /etc/fstab
+        
+        log "INFO" "Drive $drive mounted at /mnt/storage${mount_index}"
+        ((mount_index++))
+    done
+    
+    log "INFO" "Individual drives configured. Use /mnt/storage* directories for data."
+}
+
+# Execute no-RAID configuration
+execute_no_raid() {
+    log "INFO" "Setting up individual drives without RAID..."
+    
+    # Import drive group data
+    eval "$DRIVE_GROUPS_STR"
+    eval "$DRIVE_SIZES_STR"
+    
+    local drive_count=0
+    
+    # Setup all drives individually
+    for category in "${!drive_groups[@]}"; do
+        local drives_in_category=(${drive_groups[$category]})
+        local size=${drive_sizes_gb[$category]}
+        
+        for drive in "${drives_in_category[@]}"; do
+            log "INFO" "Setting up $drive as individual storage (${size}GB)..."
+            wipefs -fa "$drive"
+            
+            parted -s "$drive" mklabel gpt
+            parted -s "$drive" mkpart primary ext4 1MiB 100%
+            
+            mkfs.ext4 "${drive}1"
+            
+            # Create mount point
+            mkdir -p "/mnt/storage$drive_count"
+            echo "${drive}1 /mnt/storage$drive_count ext4 defaults 0 2" >> /etc/fstab
+            
+            log "INFO" "Drive $drive mounted at /mnt/storage$drive_count"
+            ((drive_count++))
+        done
+    done
+    
+    log "INFO" "Individual drives configured. Use /mnt/storage* directories for data."
+    log "WARNING" "No redundancy - drive failure will result in data loss!"
+}
+
+# Execute mixed optimal configuration
+execute_mixed_optimal() {
+    log "INFO" "Setting up mixed optimal configuration..."
+    
+    # Import drive group data
+    eval "$DRIVE_GROUPS_STR"
+    eval "$DRIVE_SIZES_STR"
+    
+    # Process each drive group
+    local array_index=0
+    for category in "${!drive_groups[@]}"; do
+        local drives_in_category=(${drive_groups[$category]})
+        local count=${#drives_in_category[@]}
+        local size=${drive_sizes_gb[$category]}
+        
+        if [[ $count -ge 2 ]]; then
+            # Create RAID 1 for groups with 2+ drives
+            log "INFO" "Creating RAID 1 for $category (${count} drives, ${size}GB each)"
+            
+            # Wipe drives
+            for drive in "${drives_in_category[@]:0:2}"; do
+                wipefs -fa "$drive"
+                dd if=/dev/zero of="$drive" bs=1M count=100
+            done
+            
+            # Create RAID 1
+            mdadm --create "/dev/md${array_index}" --level=1 --raid-devices=2 \
+                "${drives_in_category[0]}" "${drives_in_category[1]}"
+            
+            # Setup LVM on this RAID
+            pvcreate "/dev/md${array_index}"
+            vgcreate "vg${array_index}" "/dev/md${array_index}"
+            lvcreate -l 100%FREE -n "data${array_index}" "vg${array_index}"
+            mkfs.ext4 "/dev/vg${array_index}/data${array_index}"
+            
+            # Mount
+            mkdir -p "/mnt/raid${array_index}"
+            echo "/dev/vg${array_index}/data${array_index} /mnt/raid${array_index} ext4 defaults 0 2" >> /etc/fstab
+            
+            ((array_index++))
+        else
+            # Setup single drives individually
+            for drive in "${drives_in_category[@]}"; do
+                log "INFO" "Setting up individual drive $drive (${size}GB)"
+                wipefs -fa "$drive"
+                
+                parted -s "$drive" mklabel gpt
+                parted -s "$drive" mkpart primary ext4 1MiB 100%
+                
+                mkfs.ext4 "${drive}1"
+                
+                mkdir -p "/mnt/single${array_index}"
+                echo "${drive}1 /mnt/single${array_index} ext4 defaults 0 2" >> /etc/fstab
+                
+                ((array_index++))
+            done
+        fi
+    done
+    
+    log "INFO" "Mixed optimal configuration completed"
+}
+
+# Setup standard RAID partitions (used by RAID 5, 6, 10)
+setup_standard_raid_partitions() {
     # Partition RAID
-    log "INFO" "Partitioning RAID 6 array..."
+    log "INFO" "Partitioning RAID array..."
     parted -s /dev/md0 mklabel gpt
     parted -s /dev/md0 mkpart primary ext4 1MiB 1GiB
     parted -s /dev/md0 mkpart primary ext4 1GiB 100%
     
     # Create LVM
-    log "INFO" "Setting up LVM on RAID 6..."
+    log "INFO" "Setting up LVM..."
     pvcreate /dev/md0p2
     vgcreate vg0 /dev/md0p2
     lvcreate -L 100G -n root vg0
@@ -1113,325 +1510,5 @@ execute_raid6_all() {
     mkfs.ext4 /dev/vg0/vmdata
     
     # Setup mounts
-    setup_raid6_mounts
+    setup_raid6_mounts  # Reuse the same mount setup
 }
-
-# Execute no-RAID configuration
-execute_no_raid() {
-    log "INFO" "Setting up individual drives without RAID..."
-    
-    local drive_count=0
-    
-    # Setup 4TB drives individually
-    for drive in "${DRIVES_4TB[@]}"; do
-        log "INFO" "Setting up $drive as individual storage..."
-        wipefs -fa "$drive"
-        
-        parted -s "$drive" mklabel gpt
-        parted -s "$drive" mkpart primary ext4 1MiB 100%
-        
-        mkfs.ext4 "${drive}1"
-        
-        # Create mount point
-        mkdir -p "/mnt/storage$drive_count"
-        echo "${drive}1 /mnt/storage$drive_count ext4 defaults 0 2" >> /etc/fstab
-        
-        ((drive_count++))
-    done
-    
-    # Setup 1TB drives individually
-    for drive in "${DRIVES_1TB[@]}"; do
-        log "INFO" "Setting up $drive as individual storage..."
-        wipefs -fa "$drive"
-        
-        parted -s "$drive" mklabel gpt
-        parted -s "$drive" mkpart primary ext4 1MiB 100%
-        
-        mkfs.ext4 "${drive}1"
-        
-        # Create mount point
-        mkdir -p "/mnt/storage$drive_count"
-        echo "${drive}1 /mnt/storage$drive_count ext4 defaults 0 2" >> /etc/fstab
-        
-        ((drive_count++))
-    done
-    
-    log "INFO" "Individual drives configured. Use /mnt/storage* directories for data."
-}
-
-# Setup ZFS mounts
-setup_zfs_mounts() {
-    log "INFO" "Configuring ZFS mount points..."
-    
-    # ZFS handles its own mounting, but we can set legacy mount points if needed
-    if zpool list tank >/dev/null 2>&1; then
-        zfs set mountpoint=/tank tank
-        zfs set mountpoint=/tank/vms tank/vms
-        zfs set mountpoint=/tank/backup tank/backup
-        zfs set mountpoint=/tank/iso tank/iso
-    fi
-    
-    if zpool list system >/dev/null 2>&1; then
-        zfs set mountpoint=/system system
-        zfs set mountpoint=/system/home system/home
-        zfs set mountpoint=/system/logs system/logs
-    fi
-    
-    log "INFO" "ZFS mount points configured"
-}
-
-# Setup RAID 6 mounts
-setup_raid6_mounts() {
-    log "INFO" "Setting up mount points for RAID 6..."
-    
-    cat >> /etc/fstab << EOF
-
-# RAID Configuration - RAID 6 All Drives
-# Boot partition
-/dev/md0p1 /boot ext4 defaults 0 2
-
-# System and VM LVM
-/dev/vg0/root / ext4 defaults 0 1
-/dev/vg0/swap none swap sw 0 0
-/dev/vg0/vmdata /var/lib/vz ext4 defaults 0 2
-EOF
-
-    log "INFO" "RAID 6 mount points configured"
-}
-
-# Show RAID status after configuration
-show_raid_status() {
-    log "INFO" "RAID Configuration Status:"
-    echo
-    
-    if [[ -f /proc/mdstat ]]; then
-        log "INFO" "Software RAID Arrays:"
-        cat /proc/mdstat
-        echo
-    fi
-    
-    log "INFO" "LVM Configuration:"
-    pvdisplay --short 2>/dev/null || true
-    echo
-    vgdisplay --short 2>/dev/null || true
-    echo
-    lvdisplay --short 2>/dev/null || true
-    echo
-    
-    log "INFO" "Filesystem Layout:"
-    lsblk -f
-}
-
-# Populate RAID configurations based on detected drives
-populate_raid_configs() {
-    # Check if we have drive group data
-    if [[ -z "${DRIVE_GROUPS_STR:-}" ]] || [[ -z "${DRIVE_SIZES_STR:-}" ]]; then
-        log "ERROR" "Drive analysis data not available. Run analyze_drives first."
-        return 1
-    fi
-    
-    # Import the drive group data
-    if ! eval "$DRIVE_GROUPS_STR" 2>/dev/null; then
-        log "ERROR" "Failed to import drive groups data"
-        return 1
-    fi
-    
-    if ! eval "$DRIVE_SIZES_STR" 2>/dev/null; then
-        log "ERROR" "Failed to import drive sizes data"
-        return 1
-    fi
-    
-    # Clear existing configs except base ones
-    RAID_CONFIGS=()
-    
-    # Always available
-    RAID_CONFIGS["no-raid"]="No RAID: Use drives individually (no redundancy)"
-    
-    # Check if we have any drive groups
-    if [[ ${#drive_groups[@]} -eq 0 ]]; then
-        log "WARNING" "No drive groups found, only no-raid configuration available"
-        return 0
-    fi
-    
-    # Generate configurations based on detected drives
-    for category in "${!drive_groups[@]}"; do
-        local drives_in_category=(${drive_groups[$category]})
-        local count=${#drives_in_category[@]}
-        local size_gb=${drive_sizes_gb[$category]}
-        local usable_capacity=""
-        
-        # Calculate usable capacity for different RAID levels
-        if [[ $count -ge 2 ]]; then
-            local raid1_capacity=$((size_gb / 2))
-            usable_capacity="~${raid1_capacity}GB usable"
-            RAID_CONFIGS["raid1-${category}"]="RAID 1: ${count}x $category drives ($usable_capacity, 1 drive redundancy)"
-        fi
-        
-        if [[ $count -ge 3 ]]; then
-            local raid5_capacity=$(((count - 1) * size_gb))
-            usable_capacity="~${raid5_capacity}GB usable"
-            RAID_CONFIGS["raid5-${category}"]="RAID 5: ${count}x $category drives ($usable_capacity, 1 drive redundancy)"
-        fi
-        
-        if [[ $count -ge 4 ]]; then
-            local raid6_capacity=$(((count - 2) * size_gb))
-            local raid10_capacity=$((count / 2 * size_gb))
-            RAID_CONFIGS["raid6-${category}"]="RAID 6: ${count}x $category drives (~${raid6_capacity}GB usable, 2 drive redundancy)"
-            RAID_CONFIGS["raid10-${category}"]="RAID 10: ${count}x $category drives (~${raid10_capacity}GB usable, high performance)"
-        fi
-        
-        # Individual drive option
-        RAID_CONFIGS["individual-${category}"]="Individual: ${count}x $category drives (no redundancy, full capacity)"
-    done
-    
-    # Multi-group configurations
-    local group_count=${#drive_groups[@]}
-    if [[ $group_count -eq 2 ]]; then
-        local categories=(${!drive_groups[@]})
-        local cat1="${categories[0]}"
-        local cat2="${categories[1]}"
-        local drives1=(${drive_groups[$cat1]})
-        local drives2=(${drive_groups[$cat2]})
-        local count1=${#drives1[@]}
-        local count2=${#drives2[@]}
-        
-        if [[ $count1 -ge 2 && $count2 -ge 2 ]]; then
-            RAID_CONFIGS["dual-raid1"]="Dual RAID 1: ${count1}x $cat1 + ${count2}x $cat2 (optimal for mixed sizes)"
-        fi
-    fi
-    
-    # Mixed optimal configuration
-    if [[ $group_count -gt 1 ]]; then
-        RAID_CONFIGS["mixed-optimal"]="Mixed Optimal: Best RAID for largest groups, individual for others"
-    fi
-    
-    # ZFS configurations for drives with RAID capability
-    for category in "${!drive_groups[@]}"; do
-        local drives_in_category=(${drive_groups[$category]})
-        local count=${#drives_in_category[@]}
-        
-        if [[ $count -ge 2 ]]; then
-            RAID_CONFIGS["zfs-${category}"]="ZFS Mirror: ${count}x $category drives (advanced features, snapshots)"
-        fi
-    done
-}
-
-# Main function
-main() {
-    log "INFO" "Hetzner Proxmox Drive Preparation Script"
-    log "INFO" "========================================"
-    log "INFO" "Scanning system hardware to detect available drives..."
-    echo
-    
-    # Detect and analyze drives
-    log "INFO" "Detecting available drives..."
-    local drives_output
-    if ! drives_output=$(detect_drives); then
-        log "ERROR" "Failed to detect drives"
-        exit 1
-    fi
-    
-    local drives=($drives_output)
-    
-    if [[ ${#drives[@]} -eq 0 ]]; then
-        log "ERROR" "No suitable drives found for RAID configuration"
-        log "ERROR" "Ensure drives are properly connected and recognized by the system"
-        exit 1
-    fi
-    
-    if ! analyze_drives "${drives[@]}"; then
-        log "ERROR" "Failed to analyze drives"
-        exit 1
-    fi
-    
-    # Populate available configurations based on detected drives
-    if ! populate_raid_configs; then
-        log "ERROR" "Failed to populate RAID configurations"
-        exit 1
-    fi
-    
-    # Show current status with detailed drive information
-    if ! show_drive_status; then
-        log "WARNING" "Failed to show complete drive status, continuing..."
-    fi
-    
-    # Suggest best configuration based on what we found
-    if ! suggest_best_config; then
-        log "ERROR" "Failed to suggest best configuration"
-        exit 1
-    fi
-    
-    # If no configuration specified, show options and exit
-    if [[ -z "$RAID_CONFIG" ]]; then
-        log "INFO" "🔧 Available RAID configurations for your detected drives:"
-        echo
-        
-        # Show recommended configuration first
-        if [[ -n "${RECOMMENDED_CONFIG:-}" && -n "${RAID_CONFIGS[$RECOMMENDED_CONFIG]:-}" ]]; then
-            printf "  %-25s %s\n" "⭐ $RECOMMENDED_CONFIG" "${RAID_CONFIGS[$RECOMMENDED_CONFIG]}"
-            echo
-            log "INFO" "Other available configurations:"
-        fi
-        
-        # Show other configurations
-        for config in "${!RAID_CONFIGS[@]}"; do
-            if [[ "$config" != "${RECOMMENDED_CONFIG:-}" ]]; then
-                printf "  %-25s %s\n" "$config" "${RAID_CONFIGS[$config]}"
-            fi
-        done
-        echo
-        
-        log "INFO" "📋 Usage examples:"
-        log "INFO" "  --config ${RECOMMENDED_CONFIG:-raid1}  # Apply recommended configuration for your drives"
-        log "INFO" "  --config <option> --dry-run      # Preview any configuration"
-        log "INFO" "  --config <option>                # Apply any configuration"
-        echo
-        log "INFO" "💡 Recommendation: Use '${RECOMMENDED_CONFIG:-raid1}' for your detected drive setup"
-        log "INFO" "    This configuration was selected based on your specific hardware."
-        exit 0
-    fi
-    
-    # Validate configuration against detected drives
-    if ! validate_raid_config "$RAID_CONFIG"; then
-        log "ERROR" "Configuration '$RAID_CONFIG' is not compatible with your detected drives"
-        exit 1
-    fi
-    
-    # Show preview of what will be done
-    preview_raid_config "$RAID_CONFIG"
-    
-    # Execute configuration
-    execute_raid_config "$RAID_CONFIG"
-    
-    # Show final status
-    if [[ "$DRY_RUN" != "true" ]]; then
-        show_raid_status
-        
-        log "INFO" "✅ Drive preparation completed!"
-        log "INFO" "Configuration applied based on your system's detected drives."
-        log "INFO" ""
-        log "INFO" "Next steps:"
-        log "INFO" "1. Verify RAID sync completion: watch cat /proc/mdstat"
-        log "INFO" "2. Reboot to ensure everything mounts correctly"
-        log "INFO" "3. Configure Proxmox storage pools"
-        log "INFO" "4. Set up your VMs and containers"
-    fi
-}
-
-# Script entry point
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-    # Parse arguments
-    parse_args "$@"
-    
-    # Check if running as root (unless dry-run)
-    if [[ "$DRY_RUN" != "true" ]]; then
-        if [[ $EUID -ne 0 ]]; then
-            log "ERROR" "This script must be run as root"
-            log "INFO" "Use: sudo $0 $*"
-            exit 1
-        fi
-    fi
-    
-    # Run main function
-    main
-fi

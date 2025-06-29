@@ -1,53 +1,316 @@
 # Troubleshooting Guide
 
-This guide helps you diagnose and fix common issues with the Hetzner Proxmox setup.
+Quick solutions for common issues with the Hetzner Proxmox setup.
 
-## Common Issues
+## 🚨 Emergency Recovery
 
-### 1. Caddy Won't Start
+### Network Issues
+```bash
+# Emergency network restore (auto-created during setup)
+/root/restore-network.sh
 
-**Symptoms:**
-- `systemctl status caddy` shows failed state
-- Error: "bind: address already in use"
+# Manual network restore
+cp /etc/network/interfaces.backup /etc/network/interfaces
+systemctl restart networking
+```
+
+### Lost Proxmox Access
+```bash
+# Re-enable direct Proxmox access
+systemctl start pveproxy
+systemctl enable pveproxy
+
+# Access via: https://your-server-ip:8006
+```
+
+## 🔧 Common Issues
+
+### 1. MAC Address Problems
+
+**Symptoms:** Additional IPs not working, VMs can't reach internet
+
+**Diagnosis:**
+```bash
+./install.sh --check-mac
+```
 
 **Solutions:**
+- Get correct MAC addresses from Hetzner control panel
+- Update `.env` or `config/additional-ips.conf` with correct MACs
+- Restart affected VMs after MAC address correction
 
-Check what's using port 80/443:
+### 2. Caddy Won't Start
+
+**Symptoms:** `systemctl status caddy` shows failed state
+
+**Diagnosis:**
 ```bash
-sudo netstat -tlnp | grep ':80\|:443'
+# Check what's using ports 80/443
 sudo lsof -i :80
 sudo lsof -i :443
-```
 
-Stop conflicting services:
-```bash
-# Common conflicting services
-sudo systemctl stop apache2
-sudo systemctl stop nginx
-sudo systemctl disable apache2
-sudo systemctl disable nginx
-```
-
-Check Caddy configuration:
-```bash
+# Validate Caddy configuration
 sudo caddy validate --config /etc/caddy/Caddyfile
 ```
 
-### 2. SSL Certificate Issues
-
-**Symptoms:**
-- "Certificate not found" errors
-- Browser shows "Not Secure"
-- Let's Encrypt rate limit errors
-
 **Solutions:**
-
-Check DNS configuration:
 ```bash
-# Verify DNS points to your server
+# Stop conflicting services
+sudo systemctl stop apache2 nginx
+sudo systemctl disable apache2 nginx
+
+# Check DNS resolution
+dig +short your-domain.com
+
+# Restart Caddy
+sudo systemctl restart caddy
+```
+
+### 3. SSL Certificate Issues
+
+**Symptoms:** "Certificate not found" errors, browser shows "Not Secure"
+
+**Diagnosis:**
+```bash
+# Check DNS resolution
 dig +short your-domain.com
 nslookup your-domain.com
+
+# Check Caddy logs
+journalctl -u caddy -f
+
+# Test domain reachability
+curl -I http://your-domain.com
 ```
+
+**Solutions:**
+```bash
+# Fix DNS if needed (must point to your server's IP)
+# Wait for DNS propagation (up to 24 hours)
+
+# Force certificate renewal
+systemctl stop caddy
+rm -rf /var/lib/caddy/certificates/acme-v02.api.letsencrypt.org-directory/
+systemctl start caddy
+```
+
+### 4. pfSense VM Issues
+
+**Symptoms:** VM won't start, no network connectivity
+
+**Diagnosis:**
+```bash
+# Check VM status
+qm status 100
+
+# Check VM configuration  
+qm config 100
+
+# Check if pfSense ISO exists
+ls -la /var/lib/vz/template/iso/pfSense*
+```
+
+**Solutions:**
+```bash
+# Start VM
+qm start 100
+
+# If ISO missing, re-run pfSense setup
+sudo ./install.sh --pfsense
+
+# Check network bridges exist
+ip link show | grep vmbr
+```
+
+### 5. Network Bridge Problems
+
+**Symptoms:** VMs have no network, bridge interfaces missing
+
+**Diagnosis:**
+```bash
+# Check bridges
+ip link show | grep vmbr
+brctl show
+
+# Check network configuration
+cat /etc/network/interfaces
+```
+
+**Solutions:**
+```bash
+# Re-run network configuration
+sudo ./install.sh --network
+
+# Or manual bridge creation
+auto vmbr0
+iface vmbr0 inet static
+    address YOUR_MAIN_IP/NETMASK
+    gateway YOUR_GATEWAY
+    bridge-ports eth0
+    bridge-stp off
+    bridge-fd 0
+```
+
+### 6. Firewall Admin Container Issues
+
+**Symptoms:** Container won't start, no desktop environment
+
+**Diagnosis:**
+```bash
+# Check container status
+pct status 200
+
+# Check container configuration
+pct config 200
+
+# Check logs
+pct logs 200
+```
+
+**Solutions:**
+```bash
+# Start container
+pct start 200
+
+# Enter container for debugging
+pct enter 200
+
+# Re-create if needed
+pct destroy 200
+sudo ./install.sh --firewalladmin
+```
+
+## 🔍 Diagnostic Commands
+
+### System Status
+```bash
+# Check all services
+systemctl status caddy pveproxy pvedaemon
+
+# Check network interfaces
+ip addr show
+ip route show
+
+# Check running VMs/containers
+qm list
+pct list
+```
+
+### Network Debugging
+```bash
+# Test connectivity
+ping -c 3 8.8.8.8
+ping -c 3 your-domain.com
+
+# Check DNS resolution
+nslookup your-domain.com
+dig your-domain.com
+
+# Check firewall rules
+iptables -L -n
+ufw status
+```
+
+### Log Analysis
+```bash
+# Caddy logs
+journalctl -u caddy -f
+
+# Proxmox logs
+journalctl -u pveproxy -f
+journalctl -u pvedaemon -f
+
+# System logs
+tail -f /var/log/syslog
+dmesg | tail
+```
+
+## 🛠️ Advanced Troubleshooting
+
+### Reset Component
+```bash
+# Reset Caddy configuration
+sudo ./install.sh --caddy --dry-run  # Preview
+sudo ./install.sh --caddy            # Reapply
+
+# Reset network configuration
+sudo ./install.sh --network --dry-run  # Preview
+sudo ./install.sh --network            # Reapply
+```
+
+### Manual Configuration Check
+```bash
+# Verify environment configuration
+cat .env | grep -v '^#' | grep -v '^$'
+
+# Check additional IP configuration
+cat config/additional-ips.conf
+
+# Validate network interfaces
+ip link show
+cat /etc/network/interfaces
+```
+
+### Performance Issues
+```bash
+# Check system resources
+htop
+df -h
+free -h
+
+# Check VM resource usage
+qm monitor 100
+pct monitor 200
+
+# Check network performance
+iftop
+nethogs
+```
+
+## 📞 Getting Help
+
+### Before Asking for Help
+
+1. **Run diagnostics:**
+   ```bash
+   ./install.sh --check-mac
+   systemctl status caddy
+   qm list && pct list
+   ```
+
+2. **Check logs:**
+   ```bash
+   journalctl -u caddy --since "1 hour ago"
+   tail -f /var/log/syslog
+   ```
+
+3. **Test in dry-run mode:**
+   ```bash
+   sudo ./install.sh --network --dry-run
+   ```
+
+### Information to Include
+
+When reporting issues, include:
+- Output of diagnostic commands above
+- Your network configuration (sanitized IP addresses)
+- Error messages from logs
+- Steps that led to the issue
+- Your server specifications (CPU, RAM, drives)
+
+### Common Solutions Checklist
+
+- [ ] MAC addresses configured correctly
+- [ ] DNS pointing to correct IP
+- [ ] No conflicting services on ports 80/443
+- [ ] Network bridges exist and configured
+- [ ] VMs have sufficient resources allocated
+- [ ] All services started and enabled
+- [ ] Firewall rules not blocking traffic
+
+---
+
+**Remember:** Most issues are related to MAC address configuration or DNS resolution. Start with `./install.sh --check-mac` and verify your domain's DNS settings.
 
 Test Let's Encrypt connectivity:
 ```bash

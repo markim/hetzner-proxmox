@@ -3,25 +3,27 @@
 #
 # Format: IP=address MAC=mac_address GATEWAY=gateway NETMASK=netmask
 # 
-# IMPORTANT: MAC addresses are REQUIRED for Hetzner additional IPs
+# ⚠️  CRITICAL: MAC addresses are REQUIRED for Hetzner additional IPs!
 # Without correct MAC addresses, traffic routing will fail!
 #
 # How to get MAC addresses from Hetzner:
-# 1. Log into Hetzner Cloud Console or Robot
-# 2. Navigate to your server's network configuration
-# 3. Each additional IP should have an associated MAC address
-# 4. If no MAC address is shown, contact Hetzner support
+# 1. Hetzner Cloud: Console → Project → Server → Networking → Additional IPs
+# 2. Hetzner Robot: https://robot.hetzner.com → Server → IPs tab
+# 3. Contact Hetzner support if MAC addresses aren't visible
+#
+# Example configuration (replace with your actual values from Hetzner):
+
+IP=203.0.113.10 MAC=00:50:56:00:01:02 GATEWAY=203.0.113.1 NETMASK=255.255.255.192
+IP=203.0.113.11 MAC=00:50:56:00:01:03 GATEWAY=203.0.113.1 NETMASK=255.255.255.192
+IP=203.0.113.12 MAC=00:50:56:00:01:04 GATEWAY=203.0.113.1 NETMASK=255.255.255.192
+
+# Add more IPs as needed following the same format
+# Each line must include IP, MAC, GATEWAY, and NETMASK
+#
+# After configuration:
+# 1. Run: ./install.sh --check-mac (to verify configuration)
+# 2. Run: ./install.sh --network (to apply network setup)
 #
 # Notes:
 # - Each IP should be on its own line
-# - MAC address format: XX:XX:XX:XX:XX:XX (colon-separated)
-# - Comments start with #
-# - Empty lines are ignored
 
-# Your IP configurations (uncomment and modify as needed):
-# IP=YOUR_IP_1 MAC=YOUR_MAC_1 GATEWAY=YOUR_GATEWAY_1 NETMASK=255.255.255.192
-# IP=YOUR_IP_2 MAC=YOUR_MAC_2 GATEWAY=YOUR_GATEWAY_2 NETMASK=255.255.255.192
-
-# Example configuration:
-# IP=203.0.113.10 MAC=00:50:56:00:01:02 GATEWAY=203.0.113.1 NETMASK=255.255.255.192
-# IP=203.0.113.11 MAC=00:50:56:00:01:03 GATEWAY=203.0.113.1 NETMASK=255.255.255.192

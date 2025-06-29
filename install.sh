@@ -54,11 +54,11 @@ REQUIREMENTS:
     - Properly configured .env file
 
 NETWORK SETUP:
-    Configure ADDITIONAL_IPS in .env file with your Hetzner IPs:
-    Format: IP:MAC:GATEWAY:NETMASK,IP:MAC:GATEWAY:NETMASK
+    Configure additional IPs in one of these ways:
+    1. Create config/additional-ips.conf file
+    2. Set structured environment variables (ADDITIONAL_IP_1, ADDITIONAL_MAC_1, etc.)
     
-    Example:
-    ADDITIONAL_IPS=YOUR_ADDITIONAL_IP:YOUR_MAC_ADDRESS:YOUR_GATEWAY_IP:YOUR_NETMASK
+    See .env.example for configuration examples.
 
 SAFETY NOTES:
     - Network configuration includes automatic backup and restore capabilities

@@ -1,75 +1,64 @@
 # Hetzner Proxmox Setup
 
-Automated setup scripts for configuring a Hetzner server with Proxmox, including network configuration for additional IPs, pfSense firewall integration, and Caddy reverse proxy with HTTPS.
+Automated setup scripts for configuring a Hetzner server with Proxmox, pfSense firewall, and Caddy reverse proxy with HTTPS.
 
-## Quick Start
+## 🚀 Quick Start
 
-1. **Clone the repository:**
+1. **Clone and configure:**
    ```bash
    git clone https://github.com/yourusername/hetzner-proxmox.git
    cd hetzner-proxmox
-   ```
-
-2. **Configure environment:**
-   ```bash
    cp .env.example .env
-   # Edit .env with your domain, email, and network configuration
-   nano .env
+   nano .env  # Configure your domain, email, and network settings
    ```
 
-3. **Complete setup in order:**
+2. **⚠️ CRITICAL: Verify MAC addresses first:**
    ```bash
-   # 0. IMPORTANT: Check MAC address configuration first
    sudo ./install.sh --check-mac
-   
-   # 1. OPTIONAL: Prepare drives with optimal RAID configuration
+   ```
+   *MAC addresses are REQUIRED for Hetzner additional IPs. Without them, additional IPs won't work!*
+
+3. **Run setup components in order:**
+   ```bash
+   # Optional: Optimize drive configuration for multiple drives
    sudo ./install.sh --preparedrives
    
-   # 2. Install Caddy reverse proxy
+   # Install reverse proxy with HTTPS
    sudo ./install.sh --caddy
    
-   # 3. Configure network for pfSense integration  
+   # Configure network bridges for pfSense
    sudo ./install.sh --network
    
-   # 4. Create pfSense firewall VM
+   # Create pfSense firewall VM
    sudo ./install.sh --pfsense
    
-   # 5. Create firewall admin container
+   # Create admin container for pfSense management
    sudo ./install.sh --firewalladmin
    ```
 
-## 📖 Complete Setup Guide
+## 📖 Documentation
 
-**For detailed step-by-step instructions, see: [Complete Setup Guide](docs/complete-setup-guide.md)**
+- **[Setup Guide](docs/setup-guide.md)** - Complete installation walkthrough
+- **[Quick Reference](docs/quick-reference.md)** - Commands and common tasks
+- **[Troubleshooting](docs/troubleshooting.md)** - Common issues and solutions
 
-This guide covers the entire process from start to finish, including network architecture, security considerations, and post-setup configuration.
+## ⚙️ Available Commands
 
-## Available Commands
-
-- `./install.sh` - Show available commands and help
-- `./install.sh --check-mac` - Verify MAC address configuration for additional IPs (RECOMMENDED FIRST)
-- `./install.sh --a` - Scan drives and configure optimal RAID arrays (OPTIONAL - after installimage)
-- `./install.sh --network` - Configure network bridges for pfSense integration
-- `./install.sh --caddy` - Install and configure Caddy with HTTPS
-- `./install.sh --pfsense` - Create and configure pfSense firewall VM
-- `./install.sh --firewalladmin` - Create Fedora container for firewall administration
-- `./install.sh --all` - Complete setup (future implementation)
+| Command | Description |
+|---------|-------------|
+| `./install.sh --check-mac` | **START HERE** - Verify MAC address configuration |
+| `./install.sh --preparedrives` | Scan and configure optimal RAID setup (optional) |
+| `./install.sh --caddy` | Install Caddy reverse proxy with HTTPS |
+| `./install.sh --network` | Configure network bridges for additional IPs |
+| `./install.sh --pfsense` | Create pfSense firewall VM |
+| `./install.sh --firewalladmin` | Create Fedora container for pfSense admin access |
 
 ### Command Options
+- `--dry-run` - Preview changes without executing
+- `--verbose` - Enable detailed logging
+- `--config FILE` - Use custom environment file
 
-- `-h, --help` - Show detailed help
-- `-c, --config FILE` - Use custom environment file
-- `-d, --dry-run` - Preview changes without executing
-- `-v, --verbose` - Enable verbose logging
-
-## What This Does
-
-### Complete Infrastructure Setup
-1. **Drive Preparation** (Optional) - Intelligent RAID configuration based on detected drives
-2. **Caddy Installation** - Reverse proxy with automatic SSL certificates
-3. **Network Configuration** - Bridge setup for pfSense integration with additional IPs
-4. **pfSense Setup** - Firewall VM creation with proper network interfaces
-5. **Firewall Admin Container** - Fedora container for secure pfSense administration
+## 🏗️ What This Creates
 
 ### Network Architecture
 ```
@@ -77,63 +66,73 @@ Internet → Additional IPs → vmbr0 (WAN) → pfSense → vmbr1 (LAN) / vmbr2 
                                               ↓
                                         VMs/Containers
 ```
-- Scans and optimally configures drives for RAID (if multiple drives available)
-- Creates automatic backups and emergency restore scripts
-- Prepares network for pfSense firewall integration
-- Sets up container bridges for Proxmox
 
-### Drive Preparation (`--preparedrives`)
-- Automatically scans all available drives in your system
-- Groups drives by size and analyzes possible RAID configurations
-- Suggests optimal RAID setup based on detected hardware
-- Supports any drive sizes and combinations (no hardcoded assumptions)
-- Preview mode to safely show changes before applying
-- Works with Hetzner's installimage workflow
+### Components
 
-### Caddy Setup (`--caddy`)
-- Installs and configures Caddy web server
-- Sets up automatic HTTPS with Let's Encrypt
-- Configures Caddy as a reverse proxy for Proxmox
-- Secures Proxmox behind HTTPS on your custom domain
-- Sets up proper logging and monitoring
+**Drive Preparation** (Optional)
+- Intelligent RAID configuration based on detected hardware
+- Supports any drive combination and sizes
+- Creates backups and emergency restore scripts
 
-### Firewall Admin Container (`--firewalladmin`)
-- Creates Fedora 42-based LXC container for pfSense administration
-- Dual network interfaces: LAN access to pfSense + WAN internet access
-- Pre-installed Firefox browser for pfSense web interface
-- Network troubleshooting and monitoring tools
-- Secure admin user with desktop environment
-- Quick access scripts for common firewall tasks
+**Caddy Reverse Proxy**
+- HTTPS termination with automatic Let's Encrypt certificates
+- Secures Proxmox behind your custom domain
+- Proper logging and monitoring setup
 
-## Prerequisites
+**Network Configuration**
+- Configures additional Hetzner IPs with proper MAC addresses
+- Creates network bridges (vmbr0=WAN, vmbr1=LAN, vmbr2=DMZ)
+- Preserves SSH connectivity during changes
+- Emergency rollback scripts
 
-- Fresh Hetzner server with Proxmox installed via installimage
-- Domain name pointing to your server's IP (for Caddy setup)
-- Additional IP addresses from Hetzner (for network setup)
-- Root access to the server
-- Any combination of drives (the script will scan and adapt to your hardware)
+**pfSense Firewall VM**
+- Router/firewall VM with dual network interfaces
+- Separates internet traffic from internal network
+- Professional-grade firewall and routing capabilities
 
-## Configuration
+**Firewall Admin Container**
+- Fedora container with desktop environment and Firefox
+- Secure access to pfSense web interface
+- Network troubleshooting tools included
 
-All configuration is done via environment variables in the `.env` file:
+## 📋 Prerequisites
 
-### Basic Configuration
-- `DOMAIN`: Your domain name (e.g., proxmox.example.com)
-- `EMAIL`: Your email for Let's Encrypt certificates
-- `PROXMOX_PORT`: Proxmox web interface port (default: 8006)
+- **Hetzner Server**: Fresh Proxmox installation via Hetzner installimage
+- **Domain**: Domain name pointing to your server's main IP
+- **Additional IPs**: Additional IP addresses from Hetzner with their MAC addresses
+- **Access**: Root SSH access to the server
 
-### Network Configuration
-- `ADDITIONAL_IPS`: Additional IP addresses from Hetzner
-  - Format: `IP:MAC:GATEWAY:NETMASK,IP:MAC:GATEWAY:NETMASK`
-  - Example: `YOUR_ADDITIONAL_IP:YOUR_MAC_ADDRESS:YOUR_GATEWAY_IP:YOUR_NETMASK`
-  - **⚠️ CRITICAL**: MAC addresses are REQUIRED for each additional IP
+## ⚙️ Configuration
 
-**MAC Address Requirement:**
-Hetzner requires specific MAC addresses for each additional IP. Without correct MAC addresses, your additional IPs will not work! Use `./install.sh --check-mac` to verify your configuration before proceeding.
+### Required Configuration (.env file)
 
-See [Network Configuration Guide](docs/network-configuration.md) for detailed setup instructions.
+```bash
+# Domain and SSL
+DOMAIN=proxmox.example.com
+EMAIL=your-email@example.com
 
-## Manual Installation
+# Additional IP Configuration (Method 1: Environment Variables)
+ADDITIONAL_IP_1=203.0.113.10
+ADDITIONAL_MAC_1=00:50:56:00:01:02
+ADDITIONAL_GATEWAY_1=203.0.113.1
+ADDITIONAL_NETMASK_1=255.255.255.192
+
+ADDITIONAL_IP_2=203.0.113.11
+ADDITIONAL_MAC_2=00:50:56:00:01:03
+# ... continue for each additional IP
+```
+
+### Alternative: Config File (Method 2)
+
+Create `config/additional-ips.conf`:
+```
+IP=203.0.113.10 MAC=00:50:56:00:01:02 GATEWAY=203.0.113.1 NETMASK=255.255.255.192
+IP=203.0.113.11 MAC=00:50:56:00:01:03 GATEWAY=203.0.113.1 NETMASK=255.255.255.192
+```
+
+**⚠️ Critical**: MAC addresses are mandatory! Get them from your Hetzner control panel.
+
+## 🛠️ Manual Installation
 
 If you prefer to run individual components:
 
@@ -141,63 +140,32 @@ If you prefer to run individual components:
 # Install Caddy
 ./scripts/install-caddy.sh
 
-# Configure Proxmox settings
-./scripts/configure-proxmox.sh your-domain.com
+# Configure network
+./scripts/configure-network.sh
 
-# Setup HTTPS reverse proxy
-./scripts/setup-https.sh your-domain.com
+# Setup pfSense VM
+./scripts/setup-pfsense.sh
 
-# Configure firewall
-./scripts/configure-firewall.sh
+# Setup firewall admin container
+./scripts/setup-firewall-admin.sh
 ```
 
-## Configuration
+## 🔒 Security Features
 
-### Environment Variables
+- **HTTPS Everywhere**: All traffic encrypted with automatic SSL certificates
+- **Firewall Protection**: pfSense isolates and protects internal network
+- **Secure Admin Access**: Dedicated container for firewall management
+- **Network Isolation**: Proper VLAN separation between WAN/LAN/DMZ
+- **SSH Preservation**: Network changes preserve SSH connectivity
 
-You can customize the installation by setting these environment variables:
+## 🐛 Getting Help
 
-- `PROXMOX_PORT`: Proxmox web interface port (default: 8006)
-- `CADDY_CONFIG_DIR`: Caddy configuration directory (default: /etc/caddy)
-- `DOMAIN`: Your domain name (required)
-
-### Custom Configuration
-
-Modify the template files in the `config/` directory before running the setup:
-
-- `config/Caddyfile.template`: Caddy reverse proxy configuration
-- `config/proxmox.conf.template`: Additional Proxmox settings
-
-## Security Considerations
-
-- The script disables Proxmox web interface direct access on port 8006
-- All traffic is routed through Caddy with HTTPS
-- UFW firewall is configured with minimal required ports
-- Root login via SSH should be disabled after setup (not automated)
-
-## Troubleshooting
-
-See [docs/troubleshooting.md](docs/troubleshooting.md) for common issues and solutions.
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Test thoroughly
-5. Submit a pull request
-
-## License
-
-MIT License - see [LICENSE](LICENSE) file for details.
-
-## Support
-
-If you encounter issues:
-1. Check the troubleshooting guide
-2. Review the logs: `journalctl -u caddy -f`
-3. Open an issue with detailed information
+1. **Check the setup guide**: [docs/setup-guide.md](docs/setup-guide.md)
+2. **Review troubleshooting**: [docs/troubleshooting.md](docs/troubleshooting.md)
+3. **Verify MAC addresses**: Run `./install.sh --check-mac`
+4. **Check logs**: `journalctl -u caddy -f`
+5. **Test in dry-run mode**: Add `--dry-run` to any command
 
 ---
 
-**Warning**: This script makes system-level changes. Always test in a development environment first.
+⚠️ **Always test in a development environment first!** This script makes system-level changes.
