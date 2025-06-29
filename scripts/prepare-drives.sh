@@ -697,12 +697,14 @@ preview_dual_raid1() {
     log "INFO" "Configuration Details:"
     log "INFO" "  RAID 1 Array #1 (System): ${system_cat} drives"
     log "INFO" "    - Drives: ${drive_groups[$system_cat]}"
-    log "INFO" "    - Usable capacity: ~$((${drive_sizes_gb[$system_cat]} / 2))GB"
+    log "INFO" "    - Drive size each: ~${drive_sizes_gb[$system_cat]}GB"
+    log "INFO" "    - Usable capacity: ~${drive_sizes_gb[$system_cat]}GB (RAID 1 mirrors data across 2 drives)"
     log "INFO" "    - Usage: Root, swap, system files"
     echo
     log "INFO" "  RAID 1 Array #2 (Storage): ${storage_cat} drives"
     log "INFO" "    - Drives: ${drive_groups[$storage_cat]}"
-    log "INFO" "    - Usable capacity: ~$((${drive_sizes_gb[$storage_cat]} / 2))GB"
+    log "INFO" "    - Drive size each: ~${drive_sizes_gb[$storage_cat]}GB"
+    log "INFO" "    - Usable capacity: ~${drive_sizes_gb[$storage_cat]}GB (RAID 1 mirrors data across 2 drives)"
     log "INFO" "    - Usage: VM storage, data"
 }
 
@@ -716,7 +718,7 @@ preview_single_raid() {
     local usable_capacity
     
     case "$raid_level" in
-        "1") usable_capacity=$((size_gb / 2)) ;;
+        "1") usable_capacity=$size_gb ;;
         "5") usable_capacity=$(((count - 1) * size_gb)) ;;
         "6") usable_capacity=$(((count - 2) * size_gb)) ;;
         "10") usable_capacity=$((count * size_gb / 2)) ;;
@@ -725,9 +727,14 @@ preview_single_raid() {
     log "INFO" "Configuration Details:"
     log "INFO" "  RAID $raid_level Array: ${count}x $category drives"
     log "INFO" "    - Drives: ${drive_groups[$category]}"
-    log "INFO" "    - Total capacity: $((count * size_gb))GB"
+    log "INFO" "    - Drive size each: ~${size_gb}GB"
+    log "INFO" "    - Total raw capacity: $((count * size_gb))GB"
     log "INFO" "    - Usable capacity: ~${usable_capacity}GB"
-    log "INFO" "    - Redundancy: RAID $raid_level protection"
+    if [[ "$raid_level" == "1" ]]; then
+        log "INFO" "    - Redundancy: RAID 1 (mirrors data, usable = drive size)"
+    else
+        log "INFO" "    - Redundancy: RAID $raid_level protection"
+    fi
     log "INFO" "    - Boot partition: 1GB ext4"
     log "INFO" "    - Root partition: 100GB ext4"
     log "INFO" "    - Swap partition: 16GB"
@@ -740,13 +747,14 @@ preview_zfs_config() {
     IFS=' ' read -ra drives <<< "${drive_groups[$category]}"
     local count=${#drives[@]}
     local size_gb=${drive_sizes_gb[$category]}
-    local usable_capacity=$((size_gb / 2))  # ZFS mirror
+    local usable_capacity=$size_gb  # ZFS mirror - usable space equals one drive
     
     log "INFO" "Configuration Details:"
     log "INFO" "  ZFS Pool '$category': ${count}x $category drives"
     log "INFO" "    - Drives: ${drive_groups[$category]}"
+    log "INFO" "    - Drive size each: ~${size_gb}GB"
     log "INFO" "    - Pool type: Mirror (RAID 1 equivalent)"
-    log "INFO" "    - Usable capacity: ~${usable_capacity}GB"
+    log "INFO" "    - Usable capacity: ~${usable_capacity}GB (mirrors data)"
     log "INFO" "    - Features: Compression, snapshots, checksums"
     log "INFO" "    - Datasets: /tank/vms, /tank/backup, /tank/iso"
 }
@@ -779,7 +787,7 @@ preview_mixed_optimal() {
         local size_gb=${drive_sizes_gb[$category]}
         
         if [[ $count -ge 2 ]]; then
-            log "INFO" "    - $category: RAID 1 with ${count} drives (~$((size_gb / 2))GB usable)"
+            log "INFO" "    - $category: RAID 1 with ${count} drives (~${size_gb}GB usable, mirrors for redundancy)"
         else
             log "INFO" "    - $category: Individual drive (${size_gb}GB, no redundancy)"
         fi
@@ -933,6 +941,12 @@ suggest_best_config() {
     
     # Display recommendations
     log "INFO" "🎯 RAID Configuration Recommendations:"
+    echo
+    log "INFO" "💡 RAID Capacity Explanation:"
+    log "INFO" "  • RAID 1: Usable capacity = size of 1 drive (other drive mirrors data)"
+    log "INFO" "  • RAID 5: Usable capacity = (drives - 1) × drive size"  
+    log "INFO" "  • RAID 6: Usable capacity = (drives - 2) × drive size"
+    log "INFO" "  • RAID 10: Usable capacity = drives ÷ 2 × drive size"
     echo
     
     for i in "${!recommendations[@]}"; do
@@ -1752,7 +1766,7 @@ interactive_config_selection() {
         
         if [[ $count -ge 2 ]]; then
             configs+=("raid1-${category}")
-            descriptions+=("RAID 1 with ${count}x ${category} drives (~$((size_gb / 2))GB usable)")
+            descriptions+=("RAID 1 with ${count}x ${category} drives (~${size_gb}GB usable, mirrored)")
         fi
         
         if [[ $count -ge 3 ]]; then
@@ -1765,7 +1779,7 @@ interactive_config_selection() {
             descriptions+=("RAID 6 with ${count}x ${category} drives (~$((size_gb * (count - 2)))GB usable)")
             
             configs+=("raid10-${category}")
-            descriptions+=("RAID 10 with ${count}x ${category} drives (~$((size_gb * count / 2))GB usable)")
+            descriptions+=("RAID 10 with ${count}x ${category} drives (~$((size_gb * count / 2))GB usable, striped mirrors)")
         fi
     done
     
@@ -2169,7 +2183,7 @@ main() {
         log "INFO" "🎯 RAID Options Available with Additional Drives:"
         echo
         log "INFO" "With 2x identical drives (add 1 more ${current_category}):"
-        log "INFO" "  • RAID 1 - Perfect redundancy, ~$((current_size_gb))GB usable"
+        log "INFO" "  • RAID 1 - Perfect redundancy, ~$((current_size_gb))GB usable (mirrors data)"
         log "INFO" "  • Benefit: Drive failure protection, automatic failover"
         echo
         log "INFO" "With 3x identical drives (add 2 more ${current_category}):"
@@ -2177,7 +2191,7 @@ main() {
         log "INFO" "  • Benefit: Better storage efficiency than RAID 1"
         echo
         log "INFO" "With 4x identical drives (add 3 more ${current_category}):"
-        log "INFO" "  • RAID 10 - Excellent performance + redundancy, ~$((current_size_gb * 2))GB usable"
+        log "INFO" "  • RAID 10 - Excellent performance + redundancy, ~$((current_size_gb * 2))GB usable (striped mirrors)"
         log "INFO" "  • RAID 6 - Dual redundancy, ~$((current_size_gb * 2))GB usable"
         log "INFO" "  • Benefit: Can survive multiple drive failures"
         echo
