@@ -14,9 +14,7 @@ error_handler() {
     exit "$error_code"
 }
 
-SCRIPT_DIR
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
 # Source common functions
