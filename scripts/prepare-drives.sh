@@ -228,17 +228,19 @@ analyze_drives() {
     
     # Store results globally for use in other functions
     if declare -p drive_groups >/dev/null 2>&1; then
-        export DRIVE_GROUPS_STR
         DRIVE_GROUPS_STR=$(declare -p drive_groups)
+        export DRIVE_GROUPS_STR
     else
-        export DRIVE_GROUPS_STR="declare -A drive_groups=()"
+        DRIVE_GROUPS_STR="declare -A drive_groups=()"
+        export DRIVE_GROUPS_STR
     fi
     
     if declare -p drive_sizes_gb >/dev/null 2>&1; then
-        export DRIVE_SIZES_STR
         DRIVE_SIZES_STR=$(declare -p drive_sizes_gb)
+        export DRIVE_SIZES_STR
     else
-        export DRIVE_SIZES_STR="declare -A drive_sizes_gb=()"
+        DRIVE_SIZES_STR="declare -A drive_sizes_gb=()"
+        export DRIVE_SIZES_STR
     fi
 }
 
