@@ -699,7 +699,7 @@ suggest_best_config() {
                 best_config="raid1-${cat2}"
                 reason="RAID 1 with ${cat2}: Only this size has enough drives for redundancy"
             fi
-            recommendations+=("${best_config}:⭐ RECOMMENDED - Use drives that can form RAID"))
+            recommendations+=("${best_config}:⭐ RECOMMENDED - Use drives that can form RAID")
             recommendations+=("no-raid:Alternative - Individual drives (no redundancy)")
         fi
         
@@ -707,9 +707,9 @@ suggest_best_config() {
         # Three or more different drive sizes
         best_config="mixed-optimal"
         reason="Mixed configuration: Use largest matching pairs for RAID, others individual"
-        recommendations+=("mixed-optimal:⭐ RECOMMENDED - Optimized mixed configuration"))
-        recommendations+=("raid-largest:Alternative - RAID with largest matching group"))
-        recommendations+=("no-raid:Alternative - All drives individual"))
+        recommendations+=("mixed-optimal:⭐ RECOMMENDED - Optimized mixed configuration")
+        recommendations+=("raid-largest:Alternative - RAID with largest matching group")
+        recommendations+=("no-raid:Alternative - All drives individual")
     fi
     
     # Display recommendations
