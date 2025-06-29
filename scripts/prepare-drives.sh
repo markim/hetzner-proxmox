@@ -251,17 +251,17 @@ safe_eval_drive_groups() {
         }
     else
         log "DEBUG" "Initializing empty drive groups array"
-        declare -A drive_groups=()
+        declare -gA drive_groups=()
     fi
     
     if [[ -n "${DRIVE_SIZES_STR:-}" && "$DRIVE_SIZES_STR" =~ ^declare ]]; then
         eval "$DRIVE_SIZES_STR" 2>/dev/null || {
             log "DEBUG" "Failed to restore drive sizes data, using empty array"
-            declare -A drive_sizes_gb=()
+            declare -gA drive_sizes_gb=()
         }
     else
         log "DEBUG" "Initializing empty drive sizes array"
-        declare -A drive_sizes_gb=()
+        declare -gA drive_sizes_gb=()
     fi
 }
 
