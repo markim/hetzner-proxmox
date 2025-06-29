@@ -89,13 +89,24 @@ detect_drives() {
             continue
         fi
         
-        drives+=("$drive:$size:$model")
-        log "INFO" "  Found: $drive ($size) - $model"
+        # Check if drive is in use
+        local status=""
+        if mount | grep -q "^$drive"; then
+            status=" [MOUNTED]"
+        elif grep -q "$(basename "$drive")" /proc/mdstat 2>/dev/null; then
+            status=" [IN RAID]"
+        elif command -v pvdisplay >/dev/null 2>&1 && pvdisplay 2>/dev/null | grep -q "$drive"; then
+            status=" [IN LVM]"
+        fi
+        
+        drives+=("$drive:$size:$model$status")
+        log "INFO" "  Found: $drive ($size) - $model$status"
     done < <(lsblk -dn -o NAME,SIZE,TYPE,MODEL 2>/dev/null || true)
     
     if [[ ${#drives[@]} -eq 0 ]]; then
-        log "ERROR" "No suitable drives found"
-        exit 1
+        log "WARNING" "No suitable drives found for new RAID arrays"
+        log "INFO" "All drives appear to be in use or partitioned"
+        return 1
     fi
     
     printf "%s\n" "${drives[@]}"
@@ -169,7 +180,12 @@ main_menu() {
                 lsblk -o NAME,SIZE,TYPE,MOUNTPOINT,FSTYPE,MODEL 2>/dev/null || echo "lsblk not available"
                 echo
                 echo "Available drives for RAID:"
-                detect_drives
+                if ! detect_drives; then
+                    log "INFO" "💡 Tips for RAID setup:"
+                    log "INFO" "  • Drives with existing partitions/data cannot be used for new RAID"
+                    log "INFO" "  • To reuse drives, you would need to wipe them first (DESTROYS DATA)"
+                    log "INFO" "  • Consider adding new drives for RAID arrays"
+                fi
                 ;;
             5)
                 log "INFO" "Exiting"
