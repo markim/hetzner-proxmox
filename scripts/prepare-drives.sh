@@ -133,30 +133,48 @@ detect_drives() {
         log "DEBUG" "  $line"
     done
     
+    log "DEBUG" "Full lsblk output with all information:"
+    lsblk -a 2>/dev/null | while read -r line; do
+        log "DEBUG" "  $line"
+    done
+    
     # Get all drives except loop devices and ram - expanded detection
     local drives_raw
     drives_raw=$(lsblk -dn -o NAME,SIZE,TYPE 2>/dev/null | \
-        grep -E '^(sd|nvme|vd|xvd|hd)' | \
+        grep -E '^(sd|nvme|vd|xvd|hd|mmcblk)' | \
         grep disk | \
         awk '{print "/dev/" $1}' || true)
+    
+    log "DEBUG" "Initial drives found by lsblk: $drives_raw"
     
     # Additional detection for drives that might be missed
     local additional_drives
     additional_drives=""
     
     # Check for drives in /dev that might be missed by lsblk
-    for potential_drive in /dev/sd* /dev/nvme* /dev/vd* /dev/xvd* /dev/hd*; do
-        if [[ -b "$potential_drive" ]] && [[ "$potential_drive" =~ /dev/(sd[a-z]+|nvme[0-9]+n[0-9]+|vd[a-z]+|xvd[a-z]+|hd[a-z]+)$ ]]; then
+    log "DEBUG" "Scanning /dev for additional drives..."
+    for potential_drive in /dev/sd* /dev/nvme* /dev/vd* /dev/xvd* /dev/hd* /dev/mmcblk*; do
+        if [[ -b "$potential_drive" ]] && [[ "$potential_drive" =~ /dev/(sd[a-z]+|nvme[0-9]+n[0-9]+|vd[a-z]+|xvd[a-z]+|hd[a-z]+|mmcblk[0-9]+)$ ]]; then
+            log "DEBUG" "Checking potential drive: $potential_drive"
             # Check if this drive is not already in our list
             if [[ "$drives_raw" != *"$potential_drive"* ]]; then
                 # Verify it's actually a disk (not a partition)
                 local device_type
                 device_type=$(lsblk -dn -o TYPE "$potential_drive" 2>/dev/null || echo "")
+                log "DEBUG" "  Device type for $potential_drive: '$device_type'"
                 if [[ "$device_type" == "disk" ]]; then
                     log "DEBUG" "Found additional drive via filesystem scan: $potential_drive"
                     additional_drives="$additional_drives $potential_drive"
+                elif [[ -z "$device_type" ]]; then
+                    # If lsblk can't determine type, but it's a block device, include it
+                    log "DEBUG" "Including $potential_drive (type unknown but is block device)"
+                    additional_drives="$additional_drives $potential_drive"
                 fi
+            else
+                log "DEBUG" "  $potential_drive already in list"
             fi
+        elif [[ -e "$potential_drive" ]]; then
+            log "DEBUG" "Found file $potential_drive but it's not a block device"
         fi
     done
     
@@ -166,12 +184,46 @@ detect_drives() {
         log "DEBUG" "Combined drive list: $drives_raw"
     fi
     
+    # Alternative detection using /sys/block
+    log "DEBUG" "Alternative detection using /sys/block:"
+    local sys_drives=""
+    for block_dev in /sys/block/*; do
+        if [[ -d "$block_dev" ]]; then
+            local dev_name
+            dev_name=$(basename "$block_dev")
+            local dev_path="/dev/$dev_name"
+            log "DEBUG" "  Found in /sys/block: $dev_path"
+            
+            # Skip loop, ram, and virtual devices
+            if [[ "$dev_name" =~ ^(loop|ram|dm-) ]]; then
+                log "DEBUG" "    Skipping virtual device: $dev_name"
+                continue
+            fi
+            
+            if [[ -b "$dev_path" ]]; then
+                if [[ "$drives_raw" != *"$dev_path"* ]]; then
+                    log "DEBUG" "    Adding from /sys/block: $dev_path"
+                    sys_drives="$sys_drives $dev_path"
+                fi
+            fi
+        fi
+    done
+    
+    if [[ -n "$sys_drives" ]]; then
+        drives_raw="$drives_raw $sys_drives"
+        log "DEBUG" "Final combined drive list: $drives_raw"
+    fi
+    
     if [[ -z "$drives_raw" ]]; then
         log "ERROR" "No suitable drives found"
         log "DEBUG" "Full lsblk output for troubleshooting:"
         lsblk -a 2>/dev/null || log "DEBUG" "lsblk command failed"
         log "DEBUG" "Checking /dev directory for block devices:"
-        find /dev -name 'sd*' -o -name 'nvme*' -o -name 'vd*' -o -name 'xvd*' -o -name 'hd*' | head -20
+        find /dev -name 'sd*' -o -name 'nvme*' -o -name 'vd*' -o -name 'xvd*' -o -name 'hd*' -o -name 'mmcblk*' | head -20
+        log "DEBUG" "All block devices in /dev:"
+        ls -la /dev/ | grep "^b" | head -20
+        log "DEBUG" "Contents of /sys/block:"
+        ls -la /sys/block/ 2>/dev/null || log "DEBUG" "/sys/block not accessible"
         exit 1
     fi
     
@@ -1996,6 +2048,12 @@ main() {
     
     # Parse command line arguments
     parse_args "$@"
+    
+    # Enable debug logging for dry runs to help troubleshoot drive detection
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        export LOG_LEVEL="DEBUG"
+        log "DEBUG" "Debug logging enabled for dry run mode"
+    fi
     
     # Show usage if no arguments and not in cleanup mode
     if [[ -z "${RAID_CONFIG:-}" ]] && [[ "${DRY_RUN:-false}" == "false" ]] && [[ "${CLEANUP_ONLY:-false}" == "false" ]]; then
