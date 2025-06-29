@@ -18,30 +18,43 @@ source "$PROJECT_ROOT/lib/common.sh"
 
 # Global variables
 DRY_RUN=false
+FORCE=false
+COMMAND=""
+COMMAND_ARGS=()
 
 # Usage information
 usage() {
     cat << EOF_USAGE
-Usage: $0 [OPTIONS]
+Usage: $0 [OPTIONS] [COMMAND]
 
-Interactive mdadm interface for RAID setup.
+Interactive mdadm interface for RAID setup, or command-line mode.
 
 OPTIONS:
     -d, --dry-run          Show commands without executing
+    -f, --force            Skip confirmation prompts (dangerous!)
     -h, --help             Show this help message
 
-DESCRIPTION:
-    This script provides an interactive interface for setting up RAID arrays
-    using mdadm. It will:
+COMMANDS:
+    list                   List all drives and current RAID status
+    clear-all              Stop and remove all RAID arrays
+    clear ARRAY            Stop and remove specific RAID array (e.g., /dev/md0)
+    create LEVEL DRIVES    Create RAID array with specified level and drives
     
-    1. Scan for available drives
-    2. Ask what type of RAID you want to set up
-    3. Let you select drives for the array
-    4. Execute the mdadm commands (or show them with --dry-run)
+RAID LEVELS:
+    0, 1, 5, 6, 10, linear
+
+EXAMPLES:
+    $0                                    # Interactive mode
+    $0 list                               # List drives and RAID status
+    $0 clear-all                          # Remove all RAID arrays
+    $0 clear /dev/md0                     # Remove specific array
+    $0 create 1 /dev/nvme1n1 /dev/nvme2n1 # Create RAID 1 with two drives
+    $0 --dry-run create 5 /dev/sd{a,b,c}  # Preview RAID 5 creation
 
 SAFETY:
     - Always backup important data first
     - Use --dry-run to preview commands before execution
+    - Use --force to skip confirmation prompts (be careful!)
     - This will destroy data on selected drives
 
 EOF_USAGE
@@ -55,9 +68,20 @@ parse_args() {
                 DRY_RUN=true
                 shift
                 ;;
+            -f|--force)
+                FORCE=true
+                shift
+                ;;
             -h|--help)
                 usage
                 exit 0
+                ;;
+            list|clear-all|clear|create)
+                COMMAND="$1"
+                shift
+                # Collect remaining arguments for the command
+                COMMAND_ARGS=("$@")
+                break
                 ;;
             *)
                 log "ERROR" "Unknown option: $1"
@@ -66,6 +90,249 @@ parse_args() {
                 ;;
         esac
     done
+}
+
+# List drives and RAID status
+cmd_list() {
+    log "INFO" "=== System Drive and RAID Status ==="
+    echo
+    
+    log "INFO" "Block devices:"
+    lsblk -o NAME,SIZE,TYPE,MOUNTPOINT,FSTYPE,MODEL 2>/dev/null || echo "lsblk not available"
+    echo
+    
+    log "INFO" "Current RAID arrays:"
+    if [[ -f /proc/mdstat ]] && grep -q "^md" /proc/mdstat 2>/dev/null; then
+        cat /proc/mdstat
+    else
+        log "INFO" "  No RAID arrays found"
+    fi
+    echo
+    
+    log "INFO" "Available drives for new RAID:"
+    if ! detect_drives; then
+        log "INFO" "💡 All drives appear to be in use or partitioned"
+    fi
+}
+
+# Clear all RAID arrays
+cmd_clear_all() {
+    log "INFO" "=== Clear All RAID Arrays ==="
+    
+    if [[ ! -f /proc/mdstat ]] || ! grep -q "^md" /proc/mdstat 2>/dev/null; then
+        log "INFO" "No RAID arrays to clear"
+        return 0
+    fi
+    
+    # Get list of arrays
+    local arrays=()
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^(md[0-9]+) ]]; then
+            arrays+=("/dev/${BASH_REMATCH[1]}")
+        fi
+    done < /proc/mdstat
+    
+    if [[ ${#arrays[@]} -eq 0 ]]; then
+        log "INFO" "No arrays found to clear"
+        return 0
+    fi
+    
+    log "WARNING" "This will stop and remove ALL RAID arrays:"
+    for array in "${arrays[@]}"; do
+        log "WARNING" "  $array"
+    done
+    
+    if [[ "$FORCE" != "true" ]] && [[ "$DRY_RUN" != "true" ]]; then
+        read -r -p "Type 'YES' to confirm: " confirmation
+        if [[ "$confirmation" != "YES" ]]; then
+            log "INFO" "Operation cancelled"
+            return 1
+        fi
+    fi
+    
+    # Stop each array
+    for array in "${arrays[@]}"; do
+        cmd_clear_single "$array"
+    done
+    
+    log "INFO" "✅ All RAID arrays cleared"
+}
+
+# Clear single RAID array
+cmd_clear_single() {
+    local array="$1"
+    
+    if [[ -z "$array" ]]; then
+        log "ERROR" "No array specified for clearing"
+        return 1
+    fi
+    
+    # Validate array exists
+    if [[ ! -e "$array" ]] && [[ ! -f /proc/mdstat ]] || ! grep -q "$(basename "$array")" /proc/mdstat 2>/dev/null; then
+        log "ERROR" "Array $array not found"
+        return 1
+    fi
+    
+    log "INFO" "Clearing RAID array: $array"
+    
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log "INFO" "[DRY RUN] Would stop array: $array"
+        log "INFO" "[DRY RUN] Would remove from mdadm.conf"
+        return 0
+    fi
+    
+    # Stop the array
+    if mdadm --stop "$array" 2>/dev/null; then
+        log "INFO" "✅ Array $array stopped successfully"
+    else
+        log "WARNING" "Failed to stop $array (may already be stopped)"
+    fi
+    
+    # Remove from mdadm.conf if it exists
+    if [[ -f /etc/mdadm/mdadm.conf ]]; then
+        log "INFO" "Removing from /etc/mdadm/mdadm.conf..."
+        if grep -q "$array" /etc/mdadm/mdadm.conf; then
+            grep -v "$array" /etc/mdadm/mdadm.conf > /tmp/mdadm.conf.new
+            mv /tmp/mdadm.conf.new /etc/mdadm/mdadm.conf
+        fi
+    fi
+}
+
+# Create RAID array
+cmd_create() {
+    local raid_level="$1"
+    shift
+    local drives=("$@")
+    
+    if [[ -z "$raid_level" ]] || [[ ${#drives[@]} -eq 0 ]]; then
+        log "ERROR" "Usage: create LEVEL DRIVE1 DRIVE2 [DRIVE3...]"
+        log "ERROR" "Example: create 1 /dev/nvme1n1 /dev/nvme2n1"
+        return 1
+    fi
+    
+    # Validate RAID level
+    case "$raid_level" in
+        0|1|5|6|10|linear) ;;
+        *)
+            log "ERROR" "Invalid RAID level: $raid_level"
+            log "ERROR" "Valid levels: 0, 1, 5, 6, 10, linear"
+            return 1
+            ;;
+    esac
+    
+    # Validate minimum drives for RAID level
+    local min_drives
+    case "$raid_level" in
+        "0"|"1"|"linear") min_drives=2 ;;
+        "5") min_drives=3 ;;
+        "6"|"10") min_drives=4 ;;
+    esac
+    
+    if [[ ${#drives[@]} -lt $min_drives ]]; then
+        log "ERROR" "RAID $raid_level requires at least $min_drives drives. Provided: ${#drives[@]}"
+        return 1
+    fi
+    
+    # Special validation for RAID 10 (must be even number of drives)
+    if [[ "$raid_level" == "10" ]] && [[ $((${#drives[@]} % 2)) -ne 0 ]]; then
+        log "ERROR" "RAID 10 requires an even number of drives. Provided: ${#drives[@]}"
+        return 1
+    fi
+    
+    # Validate drives exist
+    for drive in "${drives[@]}"; do
+        if [[ ! -b "$drive" ]]; then
+            log "ERROR" "Drive $drive does not exist or is not a block device"
+            return 1
+        fi
+    done
+    
+    # Find next available md device
+    local i=0
+    while [[ -e "/dev/md$i" ]]; do
+        ((i++))
+    done
+    local array_name="/dev/md$i"
+    
+    log "INFO" "Creating RAID $raid_level array $array_name with drives: ${drives[*]}"
+    
+    # Check if drives are busy
+    local busy_drives=()
+    for drive in "${drives[@]}"; do
+        if mount | grep -q "^$drive"; then
+            busy_drives+=("$drive [MOUNTED]")
+        elif grep -q "$(basename "$drive")" /proc/mdstat 2>/dev/null; then
+            busy_drives+=("$drive [IN RAID]")
+        elif command -v pvdisplay >/dev/null 2>&1 && pvdisplay 2>/dev/null | grep -q "$drive"; then
+            busy_drives+=("$drive [IN LVM]")
+        fi
+    done
+    
+    if [[ ${#busy_drives[@]} -gt 0 ]]; then
+        log "ERROR" "Some drives are in use:"
+        for busy in "${busy_drives[@]}"; do
+            log "ERROR" "  $busy"
+        done
+        log "ERROR" "Cannot create RAID with drives that are in use"
+        return 1
+    fi
+    
+    # Confirm destructive operation
+    if [[ "$FORCE" != "true" ]] && [[ "$DRY_RUN" != "true" ]]; then
+        log "WARNING" "This will DESTROY all data on the selected drives!"
+        log "WARNING" "Drives: ${drives[*]}"
+        read -r -p "Type 'YES' to confirm: " confirmation
+        if [[ "$confirmation" != "YES" ]]; then
+            log "INFO" "Operation cancelled"
+            return 1
+        fi
+    fi
+    
+    # Prepare drives (wipe signatures)
+    for drive in "${drives[@]}"; do
+        local cmd="wipefs -fa $drive"
+        if [[ "$DRY_RUN" == "true" ]]; then
+            log "INFO" "[DRY RUN] Would run: $cmd"
+        else
+            log "INFO" "Wiping $drive..."
+            if ! $cmd; then
+                log "ERROR" "Failed to wipe $drive"
+                return 1
+            fi
+        fi
+    done
+    
+    # Build mdadm command
+    local mdadm_cmd="mdadm --create $array_name --level=$raid_level --raid-devices=${#drives[@]}"
+    
+    # Add drives to command
+    for drive in "${drives[@]}"; do
+        mdadm_cmd="$mdadm_cmd $drive"
+    done
+    
+    # Execute or show command
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log "INFO" "[DRY RUN] Would run: $mdadm_cmd"
+        log "INFO" "[DRY RUN] Array $array_name would be created with RAID level $raid_level"
+    else
+        log "INFO" "Creating RAID array..."
+        if $mdadm_cmd; then
+            log "INFO" "✅ RAID array $array_name created successfully"
+            
+            # Show array details
+            log "INFO" "Array details:"
+            mdadm --detail "$array_name" || log "WARNING" "Could not show array details"
+            
+            # Update mdadm.conf
+            if [[ -f /etc/mdadm/mdadm.conf ]]; then
+                log "INFO" "Updating /etc/mdadm/mdadm.conf..."
+                mdadm --detail --scan >> /etc/mdadm/mdadm.conf
+            fi
+        else
+            log "ERROR" "Failed to create RAID array"
+            return 1
+        fi
+    fi
 }
 
 # Detect available drives
@@ -136,7 +403,7 @@ get_raid_level() {
     
     local choice
     while true; do
-        read -p "Select RAID level (1-6): " choice
+        read -r -p "Select RAID level (1-6): " choice
         case $choice in
             1) echo "0"; return ;;
             2) echo "1"; return ;;
@@ -162,7 +429,7 @@ main_menu() {
         echo
         
         local choice
-        read -p "Select option (1-5): " choice
+        read -r -p "Select option (1-5): " choice
         
         case $choice in
             1)
@@ -197,7 +464,7 @@ main_menu() {
         esac
         
         echo
-        read -p "Press Enter to continue..."
+        read -r -p "Press Enter to continue..."
     done
 }
 
@@ -221,7 +488,41 @@ main() {
         log "INFO" "Running in DRY RUN mode - no changes will be made"
     fi
     
-    main_menu
+    # Handle command-line mode
+    if [[ -n "$COMMAND" ]]; then
+        case "$COMMAND" in
+            list)
+                cmd_list
+                ;;
+            clear-all)
+                cmd_clear_all
+                ;;
+            clear)
+                if [[ ${#COMMAND_ARGS[@]} -eq 0 ]]; then
+                    log "ERROR" "Usage: clear ARRAY_NAME"
+                    log "ERROR" "Example: clear /dev/md0"
+                    exit 1
+                fi
+                cmd_clear_single "${COMMAND_ARGS[0]}"
+                ;;
+            create)
+                if [[ ${#COMMAND_ARGS[@]} -lt 2 ]]; then
+                    log "ERROR" "Usage: create LEVEL DRIVE1 DRIVE2 [DRIVE3...]"
+                    log "ERROR" "Example: create 1 /dev/nvme1n1 /dev/nvme2n1"
+                    exit 1
+                fi
+                cmd_create "${COMMAND_ARGS[@]}"
+                ;;
+            *)
+                log "ERROR" "Unknown command: $COMMAND"
+                usage
+                exit 1
+                ;;
+        esac
+    else
+        # Interactive mode
+        main_menu
+    fi
 }
 
 # Run main function
