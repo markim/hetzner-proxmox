@@ -31,6 +31,10 @@ RAID_CONFIG=""
 FORCE=false
 CLEANUP_ONLY=false
 
+# Global arrays for drive analysis
+declare -A drive_groups
+declare -A drive_sizes_gb
+
 # RAID configuration options (will be dynamically populated)
 declare -A RAID_CONFIGS=(
     ["dual-raid1"]="Dual RAID 1: Separate RAID 1 arrays for different drive sizes"
@@ -165,10 +169,6 @@ analyze_drives() {
         exit 1
     fi
     
-    # Create associative arrays to group drives by size
-    declare -A drive_groups
-    declare -A drive_sizes_gb
-    
     log "INFO" "Analyzing drive sizes..."
     
     for drive in "${drives[@]}"; do
@@ -246,33 +246,37 @@ analyze_drives() {
 
 # Helper function to safely evaluate stored drive group variables
 safe_eval_drive_groups() {
+    log "DEBUG" "safe_eval_drive_groups: DRIVE_GROUPS_STR=${DRIVE_GROUPS_STR:-EMPTY}"
+    log "DEBUG" "safe_eval_drive_groups: DRIVE_SIZES_STR=${DRIVE_SIZES_STR:-EMPTY}"
+    
+    # Since arrays are now declared globally, we only need to restore data if available
     if [[ -n "${DRIVE_GROUPS_STR:-}" && "$DRIVE_GROUPS_STR" =~ ^declare ]]; then
-        eval "$DRIVE_GROUPS_STR" 2>/dev/null || {
+        # Replace 'declare -A' with 'declare -gA' to ensure global scope
+        local modified_groups_str="${DRIVE_GROUPS_STR/declare -A/declare -gA}"
+        log "DEBUG" "Evaluating: $modified_groups_str"
+        eval "$modified_groups_str" 2>/dev/null || {
             log "ERROR" "Failed to restore drive groups data"
             return 1
         }
-    else
-        log "DEBUG" "Initializing empty drive groups array"
-        declare -gA drive_groups=()
     fi
     
     if [[ -n "${DRIVE_SIZES_STR:-}" && "$DRIVE_SIZES_STR" =~ ^declare ]]; then
-        eval "$DRIVE_SIZES_STR" 2>/dev/null || {
+        # Replace 'declare -A' with 'declare -gA' to ensure global scope
+        local modified_sizes_str="${DRIVE_SIZES_STR/declare -A/declare -gA}"
+        log "DEBUG" "Evaluating: $modified_sizes_str"
+        eval "$modified_sizes_str" 2>/dev/null || {
             log "DEBUG" "Failed to restore drive sizes data, using empty array"
-            declare -gA drive_sizes_gb=()
         }
-    else
-        log "DEBUG" "Initializing empty drive sizes array"
-        declare -gA drive_sizes_gb=()
     fi
+    
+    # Verify arrays are accessible
+    log "DEBUG" "drive_groups array size: ${#drive_groups[@]}"
+    log "DEBUG" "drive_sizes_gb array size: ${#drive_sizes_gb[@]}"
 }
 
 # Validate RAID configuration
 validate_raid_config() {
     local config="$1"
-    
-    # Import the drive group data
-    safe_eval_drive_groups
     
     case "$config" in
         "dual-raid1")
@@ -654,9 +658,6 @@ preview_no_raid() {
 
 # Suggest best RAID configuration based on detected drives
 suggest_best_config() {
-    # Import the drive group data
-    safe_eval_drive_groups
-    
     local recommendations=()
     local best_config=""
     local reason=""
@@ -1549,9 +1550,6 @@ setup_standard_raid_partitions() {
 interactive_config_selection() {
     log "INFO" "🎯 Drive Configuration Selection"
     echo
-    
-    # Import the drive group data
-    safe_eval_drive_groups
     
     # Get available configurations
     local configs=()
