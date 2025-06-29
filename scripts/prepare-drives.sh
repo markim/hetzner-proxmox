@@ -3,13 +3,26 @@
 # Hetzner Proxmox Setup - Drive Preparation and RAID Configuration
 # This script handles drive preparation and RAID setup for various configurations
 
-set -euo pipefail
+set -uo pipefail
+
+# Error handler
+error_handler() {
+    local line_no=$1
+    local error_code=$2
+    echo "[ERROR] Script failed at line $line_no with exit code $error_code" >&2
+    echo "[ERROR] Drive preparation failed" >&2
+    exit $error_code
+}
 
 readonly SCRIPT_NAME="prepare-drives"
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
 # Source common functions
+if [[ ! -f "$PROJECT_ROOT/lib/common.sh" ]]; then
+    echo "[ERROR] Common library not found: $PROJECT_ROOT/lib/common.sh" >&2
+    exit 1
+fi
 source "$PROJECT_ROOT/lib/common.sh"
 
 # Default values
@@ -103,10 +116,20 @@ parse_args() {
 # Detect available drives
 detect_drives() {
     # Get all drives except loop devices and ram
-    local drives=($(lsblk -dn -o NAME,SIZE,TYPE | grep -E '^(sd|nvme|vd)' | grep disk | awk '{print "/dev/" $1}'))
+    local drives_raw
+    drives_raw=$(lsblk -dn -o NAME,SIZE,TYPE 2>/dev/null | grep -E '^(sd|nvme|vd)' | grep disk | awk '{print "/dev/" $1}' || true)
+    
+    if [[ -z "$drives_raw" ]]; then
+        log "ERROR" "No suitable drives found"
+        log "DEBUG" "lsblk output:"
+        lsblk -dn -o NAME,SIZE,TYPE 2>/dev/null || log "DEBUG" "lsblk command failed"
+        exit 1
+    fi
+    
+    local drives=($drives_raw)
     
     if [[ ${#drives[@]} -eq 0 ]]; then
-        log "ERROR" "No suitable drives found"
+        log "ERROR" "No suitable drives found after filtering"
         exit 1
     fi
     
@@ -115,7 +138,7 @@ detect_drives() {
         log "INFO" "Found ${#drives[@]} drives:"
         for drive in "${drives[@]}"; do
             local size=$(lsblk -dn -o SIZE "$drive" 2>/dev/null || echo "unknown")
-            local model=$(lsblk -dn -o MODEL "$drive" 2>/dev/null || echo "unknown")
+            local model=$(lsblk -dn -o MODEL "$drive" 2>/dev/null | sed 's/[[:space:]]\+/ /g' || echo "unknown")
             log "INFO" "  $drive: $size ($model)"
         done
     } >&2
@@ -128,6 +151,11 @@ detect_drives() {
 analyze_drives() {
     local drives=($@)
     
+    if [[ ${#drives[@]} -eq 0 ]]; then
+        log "ERROR" "No drives provided to analyze"
+        exit 1
+    fi
+    
     # Create associative arrays to group drives by size
     declare -A drive_groups
     declare -A drive_sizes_gb
@@ -135,7 +163,18 @@ analyze_drives() {
     log "INFO" "Analyzing drive sizes..."
     
     for drive in "${drives[@]}"; do
-        local size_bytes=$(lsblk -dn -b -o SIZE "$drive")
+        if [[ ! -b "$drive" ]]; then
+            log "WARNING" "Skipping non-existent drive: $drive"
+            continue
+        fi
+        
+        local size_bytes
+        size_bytes=$(lsblk -dn -b -o SIZE "$drive" 2>/dev/null)
+        if [[ -z "$size_bytes" || "$size_bytes" -eq 0 ]]; then
+            log "WARNING" "Could not determine size for drive: $drive"
+            continue
+        fi
+        
         local size_gb=$((size_bytes / 1024 / 1024 / 1024))
         local size_tb=$((size_gb / 1024))
         
@@ -164,6 +203,12 @@ analyze_drives() {
         log "DEBUG" "$drive: ${size_gb}GB (category: $size_category)"
     done
     
+    # Check if we have any valid drives after analysis
+    if [[ ${#drive_groups[@]} -eq 0 ]]; then
+        log "ERROR" "No valid drives found after analysis"
+        exit 1
+    fi
+    
     # Display analysis results
     log "INFO" "Drive analysis results:"
     for category in "${!drive_groups[@]}"; do
@@ -174,8 +219,8 @@ analyze_drives() {
     done
     
     # Store results globally for compatibility and recommendations
-    export DRIVE_GROUPS_STR=$(declare -p drive_groups)
-    export DRIVE_SIZES_STR=$(declare -p drive_sizes_gb)
+    export DRIVE_GROUPS_STR=$(declare -p drive_groups 2>/dev/null || echo "declare -A drive_groups=()")
+    export DRIVE_SIZES_STR=$(declare -p drive_sizes_gb 2>/dev/null || echo "declare -A drive_sizes_gb=()")
     
     # For backward compatibility, still populate old variables
     local drive_4tb=()
@@ -318,42 +363,55 @@ show_drive_status() {
     
     # Show physical drives with detailed information
     log "INFO" "Detected Physical Drives:"
-    echo "╭────────────────────────────────────────────────────────────────╮"
-    echo "│ Drive       Size      Model                    Serial           │"
-    echo "├────────────────────────────────────────────────────────────────┤"
+    echo "+------------------------------------------------------------------+"
+    echo "| Drive       Size      Model                    Serial           |"
+    echo "+------------------------------------------------------------------+"
     
-    local drives=($(lsblk -dn -o NAME | grep -E '^(sd|nvme|vd)'))
+    local drives_raw
+    drives_raw=$(lsblk -dn -o NAME 2>/dev/null | grep -E '^(sd|nvme|vd)' || echo "")
+    
+    if [[ -z "$drives_raw" ]]; then
+        echo "| No drives detected                                               |"
+        echo "+------------------------------------------------------------------+"
+        log "WARNING" "No drives found during detailed scan"
+        return 0
+    fi
+    
+    local drives=($drives_raw)
     local drive_count=0
     
     for drive_name in "${drives[@]}"; do
         local drive="/dev/$drive_name"
         if [[ -b "$drive" ]]; then
             local size=$(lsblk -dn -o SIZE "$drive" 2>/dev/null || echo "unknown")
-            local model=$(lsblk -dn -o MODEL "$drive" 2>/dev/null | tr -s ' ' || echo "unknown")
+            local model=$(lsblk -dn -o MODEL "$drive" 2>/dev/null | sed 's/[[:space:]]\+/ /g' | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//' || echo "unknown")
             local serial=$(lsblk -dn -o SERIAL "$drive" 2>/dev/null || echo "unknown")
             
-            # Truncate long strings for display
+            # Clean up and truncate long strings for display
             model="${model:0:20}"
             serial="${serial:0:15}"
             
-            printf "│ %-10s  %-8s  %-20s  %-15s │\n" "$drive" "$size" "$model" "$serial"
+            # Use safer printf with proper field widths
+            printf "| %-10s  %-8s  %-20s  %-15s |\n" "$drive" "$size" "$model" "$serial"
             ((drive_count++))
         fi
     done
     
-    echo "╰────────────────────────────────────────────────────────────────╯"
+    echo "+------------------------------------------------------------------+"
     log "INFO" "Total drives detected: $drive_count"
     echo
     
     # Show partitions if any exist
     log "INFO" "Current Partition Layout:"
-    lsblk -o NAME,SIZE,TYPE,MOUNTPOINT,FSTYPE | grep -E '(NAME|disk|part|raid|lvm)'
+    if ! lsblk -o NAME,SIZE,TYPE,MOUNTPOINT,FSTYPE 2>/dev/null | grep -E '(NAME|disk|part|raid|lvm)'; then
+        log "INFO" "  Unable to retrieve partition information"
+    fi
     echo
     
     # Show existing RAID arrays
     if [[ -f /proc/mdstat ]]; then
         log "INFO" "Existing Software RAID Arrays:"
-        if grep -q "^md" /proc/mdstat; then
+        if grep -q "^md" /proc/mdstat 2>/dev/null; then
             cat /proc/mdstat
         else
             log "INFO" "  No software RAID arrays detected"
@@ -364,8 +422,8 @@ show_drive_status() {
     # Show LVM status
     if command -v pvdisplay >/dev/null 2>&1; then
         log "INFO" "LVM Physical Volumes:"
-        if pvdisplay 2>/dev/null | grep -q "PV Name"; then
-            pvdisplay --short 2>/dev/null || log "INFO" "  No LVM physical volumes detected"
+        if pvdisplay 2>/dev/null | grep -q "PV Name" 2>/dev/null; then
+            pvdisplay --short 2>/dev/null || log "INFO" "  Unable to retrieve LVM information"
         else
             log "INFO" "  No LVM physical volumes detected"
         fi
@@ -376,7 +434,7 @@ show_drive_status() {
     if command -v zpool >/dev/null 2>&1; then
         log "INFO" "ZFS Pools:"
         if zpool list 2>/dev/null | grep -v "no pools available" >/dev/null 2>&1; then
-            zpool list 2>/dev/null || log "INFO" "  No ZFS pools detected"
+            zpool list 2>/dev/null || log "INFO" "  Unable to retrieve ZFS information"
         else
             log "INFO" "  No ZFS pools detected"
         fi
@@ -1166,15 +1224,34 @@ show_raid_status() {
 
 # Populate RAID configurations based on detected drives
 populate_raid_configs() {
+    # Check if we have drive group data
+    if [[ -z "${DRIVE_GROUPS_STR:-}" ]] || [[ -z "${DRIVE_SIZES_STR:-}" ]]; then
+        log "ERROR" "Drive analysis data not available. Run analyze_drives first."
+        return 1
+    fi
+    
     # Import the drive group data
-    eval "$DRIVE_GROUPS_STR"
-    eval "$DRIVE_SIZES_STR"
+    if ! eval "$DRIVE_GROUPS_STR" 2>/dev/null; then
+        log "ERROR" "Failed to import drive groups data"
+        return 1
+    fi
+    
+    if ! eval "$DRIVE_SIZES_STR" 2>/dev/null; then
+        log "ERROR" "Failed to import drive sizes data"
+        return 1
+    fi
     
     # Clear existing configs except base ones
     RAID_CONFIGS=()
     
     # Always available
     RAID_CONFIGS["no-raid"]="No RAID: Use drives individually (no redundancy)"
+    
+    # Check if we have any drive groups
+    if [[ ${#drive_groups[@]} -eq 0 ]]; then
+        log "WARNING" "No drive groups found, only no-raid configuration available"
+        return 0
+    fi
     
     # Generate configurations based on detected drives
     for category in "${!drive_groups[@]}"; do
@@ -1249,7 +1326,11 @@ main() {
     # Detect and analyze drives
     log "INFO" "Detecting available drives..."
     local drives_output
-    drives_output=$(detect_drives)
+    if ! drives_output=$(detect_drives); then
+        log "ERROR" "Failed to detect drives"
+        exit 1
+    fi
+    
     local drives=($drives_output)
     
     if [[ ${#drives[@]} -eq 0 ]]; then
@@ -1258,16 +1339,27 @@ main() {
         exit 1
     fi
     
-    analyze_drives "${drives[@]}"
+    if ! analyze_drives "${drives[@]}"; then
+        log "ERROR" "Failed to analyze drives"
+        exit 1
+    fi
     
     # Populate available configurations based on detected drives
-    populate_raid_configs
+    if ! populate_raid_configs; then
+        log "ERROR" "Failed to populate RAID configurations"
+        exit 1
+    fi
     
     # Show current status with detailed drive information
-    show_drive_status
+    if ! show_drive_status; then
+        log "WARNING" "Failed to show complete drive status, continuing..."
+    fi
     
     # Suggest best configuration based on what we found
-    suggest_best_config
+    if ! suggest_best_config; then
+        log "ERROR" "Failed to suggest best configuration"
+        exit 1
+    fi
     
     # If no configuration specified, show options and exit
     if [[ -z "$RAID_CONFIG" ]]; then
