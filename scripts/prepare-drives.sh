@@ -224,8 +224,41 @@ analyze_drives() {
     done
     
     # Store results globally for use in other functions
-    export DRIVE_GROUPS_STR=$(declare -p drive_groups 2>/dev/null || echo "declare -A drive_groups=()")
-    export DRIVE_SIZES_STR=$(declare -p drive_sizes_gb 2>/dev/null || echo "declare -A drive_sizes_gb=()")
+    if declare -p drive_groups >/dev/null 2>&1; then
+        export DRIVE_GROUPS_STR=$(declare -p drive_groups)
+    else
+        export DRIVE_GROUPS_STR="declare -A drive_groups=()"
+    fi
+    
+    if declare -p drive_sizes_gb >/dev/null 2>&1; then
+        export DRIVE_SIZES_STR=$(declare -p drive_sizes_gb)
+    else
+        export DRIVE_SIZES_STR="declare -A drive_sizes_gb=()"
+    fi
+}
+
+# Helper function to safely evaluate stored drive group variables
+safe_eval_drive_groups() {
+    if [[ -n "${DRIVE_GROUPS_STR:-}" && "$DRIVE_GROUPS_STR" =~ ^declare ]]; then
+        eval "$DRIVE_GROUPS_STR" 2>/dev/null || {
+            log "ERROR" "Failed to restore drive groups data"
+            return 1
+        }
+    else
+        log "DEBUG" "Initializing empty drive groups array"
+        declare -A drive_groups=()
+    fi
+    
+    if [[ -n "${DRIVE_SIZES_STR:-}" && "$DRIVE_SIZES_STR" =~ ^declare ]]; then
+        eval "$DRIVE_SIZES_STR" 2>/dev/null || {
+            log "DEBUG" "Failed to restore drive sizes data, using empty array"
+            declare -A drive_sizes_gb=()
+        }
+    else
+        log "DEBUG" "Initializing empty drive sizes array"
+        declare -A drive_sizes_gb=()
+    fi
+}
 }
 
 # Validate RAID configuration
@@ -233,7 +266,7 @@ validate_raid_config() {
     local config="$1"
     
     # Import the drive group data
-    eval "$DRIVE_GROUPS_STR"
+    safe_eval_drive_groups
     
     case "$config" in
         "dual-raid1")
@@ -427,8 +460,7 @@ preview_raid_config() {
     echo
     
     # Import the drive group data
-    eval "$DRIVE_GROUPS_STR"
-    eval "$DRIVE_SIZES_STR"
+    safe_eval_drive_groups
     
     case "$config" in
         "dual-raid1")
@@ -600,8 +632,7 @@ preview_no_raid() {
 # Suggest best RAID configuration based on detected drives
 suggest_best_config() {
     # Import the drive group data
-    eval "$DRIVE_GROUPS_STR"
-    eval "$DRIVE_SIZES_STR"
+    safe_eval_drive_groups
     
     local recommendations=()
     local best_config=""
@@ -825,8 +856,7 @@ execute_dual_raid1() {
     log "INFO" "Setting up dual RAID 1 configuration..."
     
     # Import drive group data and determine which drives to use
-    eval "$DRIVE_GROUPS_STR"
-    eval "$DRIVE_SIZES_STR"
+    safe_eval_drive_groups
     
     # Find the two drive groups
     local categories=(${!drive_groups[@]})
@@ -953,8 +983,7 @@ execute_single_raid1() {
     log "INFO" "Setting up RAID 1 configuration for $category drives..."
     
     # Import drive group data
-    eval "$DRIVE_GROUPS_STR"
-    eval "$DRIVE_SIZES_STR"
+    safe_eval_drive_groups
     
     # Get drives for this category
     if [[ -z "${drive_groups[$category]:-}" ]]; then
@@ -1126,8 +1155,7 @@ execute_zfs_mirror() {
     log "INFO" "Setting up ZFS mirror configuration for $category drives..."
     
     # Import drive group data
-    eval "$DRIVE_GROUPS_STR"
-    eval "$DRIVE_SIZES_STR"
+    safe_eval_drive_groups
     
     # Install ZFS
     log "INFO" "Installing ZFS packages..."
@@ -1186,8 +1214,7 @@ execute_raid6() {
     log "INFO" "Setting up RAID 6 configuration for $category drives..."
     
     # Import drive group data
-    eval "$DRIVE_GROUPS_STR"
-    eval "$DRIVE_SIZES_STR"
+    safe_eval_drive_groups
     
     # Get drives for this category
     if [[ -z "${drive_groups[$category]:-}" ]]; then
@@ -1231,8 +1258,7 @@ execute_raid5() {
     log "INFO" "Setting up RAID 5 configuration for $category drives..."
     
     # Import drive group data
-    eval "$DRIVE_GROUPS_STR"
-    eval "$DRIVE_SIZES_STR"
+    safe_eval_drive_groups
     
     # Get drives for this category
     if [[ -z "${drive_groups[$category]:-}" ]]; then
@@ -1276,8 +1302,7 @@ execute_raid10() {
     log "INFO" "Setting up RAID 10 configuration for $category drives..."
     
     # Import drive group data
-    eval "$DRIVE_GROUPS_STR"
-    eval "$DRIVE_SIZES_STR"
+    safe_eval_drive_groups
     
     # Get drives for this category
     if [[ -z "${drive_groups[$category]:-}" ]]; then
@@ -1326,8 +1351,7 @@ execute_individual() {
     log "INFO" "Setting up individual drives for $category..."
     
     # Import drive group data
-    eval "$DRIVE_GROUPS_STR"
-    eval "$DRIVE_SIZES_STR"
+    safe_eval_drive_groups
     
     # Get drives for this category
     if [[ -z "${drive_groups[$category]:-}" ]]; then
@@ -1367,8 +1391,7 @@ execute_no_raid() {
     log "INFO" "Setting up individual drives without RAID..."
     
     # Import drive group data
-    eval "$DRIVE_GROUPS_STR"
-    eval "$DRIVE_SIZES_STR"
+    safe_eval_drive_groups
     
     local drive_count=0
     
@@ -1404,8 +1427,7 @@ execute_mixed_optimal() {
     log "INFO" "Setting up mixed optimal configuration..."
     
     # Import drive group data
-    eval "$DRIVE_GROUPS_STR"
-    eval "$DRIVE_SIZES_STR"
+    safe_eval_drive_groups
     
     # Process each drive group
     local array_index=0
@@ -1494,8 +1516,7 @@ interactive_config_selection() {
     echo
     
     # Import the drive group data
-    eval "$DRIVE_GROUPS_STR"
-    eval "$DRIVE_SIZES_STR"
+    safe_eval_drive_groups
     
     # Get available configurations
     local configs=()
@@ -1620,7 +1641,7 @@ confirm_operation() {
     echo
     
     # Show which drives will be affected
-    eval "$DRIVE_GROUPS_STR"
+    safe_eval_drive_groups
     log "WARNING" "Drives that will be affected:"
     for category in "${!drive_groups[@]}"; do
         local drives_in_category=(${drive_groups[$category]})
@@ -1692,7 +1713,8 @@ perform_safety_checks() {
     fi
     
     # Check if any of the target drives are currently mounted
-    eval "$DRIVE_GROUPS_STR"
+    safe_eval_drive_groups
+    
     local mounted_drives=()
     for category in "${!drive_groups[@]}"; do
         local drives_in_category=(${drive_groups[$category]})
@@ -1735,7 +1757,7 @@ create_emergency_info() {
         echo ""
         echo "# Current partition table dumps:"
         
-        eval "$DRIVE_GROUPS_STR"
+        safe_eval_drive_groups
         for category in "${!drive_groups[@]}"; do
             local drives_in_category=(${drive_groups[$category]})
             for drive in "${drives_in_category[@]}"; do
@@ -1837,6 +1859,7 @@ main() {
     log "INFO" "Analyzing drive configuration..."
     analyze_drives "${drives[@]}"
     
+       
     # Suggest best configuration
 
     suggest_best_config
