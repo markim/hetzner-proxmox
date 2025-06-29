@@ -5,8 +5,8 @@
 
 set -euo pipefail
 
-readonly SCRIPT_NAME="configure-network"
-readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+readonly SCRIPT_DIR
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Source common functions
 source "$SCRIPT_DIR/lib/common.sh"
@@ -17,7 +17,8 @@ load_env "$SCRIPT_DIR/.env"
 # Network configuration safety checks
 readonly NETWORK_BACKUP_DIR="/root/network-backups"
 readonly INTERFACES_FILE="/etc/network/interfaces"
-readonly INTERFACES_BACKUP="$NETWORK_BACKUP_DIR/interfaces.backup.$(date +%Y%m%d_%H%M%S)"
+readonly INTERFACES_BACKUP
+INTERFACES_BACKUP="$NETWORK_BACKUP_DIR/interfaces.backup.$(date +%Y%m%d_%H%M%S)"
 
 # Create backup directory
 create_backup_dir() {
@@ -48,7 +49,7 @@ get_ssh_info() {
         # Try to find the physical interface from bridge configuration
         if [[ -f /sys/class/net/vmbr0/bridge/bridge_id ]]; then
             # This is definitely a bridge, get the physical interface
-            physical_interface=$(ls /sys/class/net/vmbr0/brif/ 2>/dev/null | head -n1)
+            physical_interface=$(find /sys/class/net/vmbr0/brif/ -mindepth 1 -maxdepth 1 2>/dev/null | head -n1 | xargs basename)
             if [[ -n "$physical_interface" ]]; then
                 log "INFO" "Found physical interface: $physical_interface"
                 export PHYSICAL_INTERFACE="$physical_interface"
@@ -313,7 +314,8 @@ EOF
             local netmask="${ADDITIONAL_NETMASKS_ARRAY[$i]}"
             
             # Convert netmask to CIDR
-            local cidr=$(netmask_to_cidr "$netmask")
+            local cidr
+            cidr=$(netmask_to_cidr "$netmask")
             
             log "INFO" "Adding IP $ip/$cidr with gateway $gateway"
             
@@ -520,8 +522,10 @@ validate_interfaces_syntax() {
     fi
     
     # Check for proper indentation in post-up/post-down commands
-    local post_up_count=$(grep -c "^[[:space:]]*post-up" "$config_file" || true)
-    local post_down_count=$(grep -c "^[[:space:]]*post-down" "$config_file" || true)
+    local post_up_count
+    post_up_count=$(grep -c "^[[:space:]]*post-up" "$config_file" || true)
+    local post_down_count
+    post_down_count=$(grep -c "^[[:space:]]*post-down" "$config_file" || true)
     
     if [[ $post_up_count -ne $post_down_count ]]; then
         log "ERROR" "Mismatched post-up ($post_up_count) and post-down ($post_down_count) commands"
@@ -643,7 +647,8 @@ apply_network_config() {
                 local ip="${ADDITIONAL_IPS_ARRAY[$i]}"
                 local gateway="${ADDITIONAL_GATEWAYS_ARRAY[$i]}"
                 local netmask="${ADDITIONAL_NETMASKS_ARRAY[$i]}"
-                local cidr=$(netmask_to_cidr "$netmask")
+                local cidr
+                cidr=$(netmask_to_cidr "$netmask")
                 log "INFO" "  - IP: $ip/$cidr, Gateway: $gateway"
             done
         else
@@ -653,9 +658,9 @@ apply_network_config() {
         log "INFO" ""
         log "INFO" "Generated configuration file contents:"
         log "INFO" "=========================================="
-        cat "$NEW_INTERFACES_CONFIG" | while IFS= read -r line; do
+        while IFS= read -r line; do
             log "INFO" "$line"
-        done
+        done < "$NEW_INTERFACES_CONFIG"
         log "INFO" "=========================================="
         log "INFO" ""
         
@@ -917,7 +922,7 @@ show_network_status() {
     ip route
     echo
     echo "=== DNS Configuration ==="
-    cat /etc/resolv.conf | grep -v "^#"
+    grep -v "^#" /etc/resolv.conf
     echo
 }
 

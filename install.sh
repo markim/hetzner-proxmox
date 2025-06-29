@@ -5,10 +5,12 @@
 
 set -euo pipefail
 
-readonly SCRIPT_NAME="install"
-readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Get script directory
+readonly SCRIPT_DIR
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Source common functions
+# shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/common.sh"
 
 # Load default environment (will be overridden by parse_args if needed)
@@ -309,6 +311,7 @@ run_script() {
 main() {
     case "${COMMAND:-}" in
         "preparedrives")
+            # shellcheck disable=SC2119
             run_drive_preparation
             ;;
         "caddy")
@@ -544,6 +547,7 @@ run_mac_check() {
 }
 
 # Run drive preparation and RAID setup
+# shellcheck disable=SC2120
 run_drive_preparation() {
     log "INFO" "Starting Hetzner Proxmox drive preparation..."
     log "INFO" "Logs are being written to: $LOG_FILE"

@@ -5,7 +5,8 @@
 
 set -euo pipefail
 
-readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Colors for output
 readonly GREEN='\033[0;32m'
@@ -108,7 +109,7 @@ test_templates() {
     
     # Test if template has required variables
     if [[ -f "$SCRIPT_DIR/../config/Caddyfile.template" ]]; then
-        if grep -q '\${DOMAIN}' "$SCRIPT_DIR/../config/Caddyfile.template"; then
+        if grep -q "\${DOMAIN}" "$SCRIPT_DIR/../config/Caddyfile.template"; then
             log_test "PASS" "Caddyfile template contains DOMAIN variable"
         else
             log_test "FAIL" "Caddyfile template missing DOMAIN variable"
@@ -159,7 +160,8 @@ main() {
     echo "Testing individual scripts..."
     for script in "$SCRIPT_DIR"/../scripts/*.sh; do
         if [[ -f "$script" ]]; then
-            local script_name=$(basename "$script")
+            local script_name
+            script_name=$(basename "$script")
             test_script_executable "$script" "$script_name"
             test_script_syntax "$script" "$script_name"
         fi

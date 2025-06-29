@@ -5,8 +5,8 @@
 
 set -euo pipefail
 
-readonly SCRIPT_NAME="check-mac-addresses"
-readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+readonly SCRIPT_DIR
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Source common functions
 source "$SCRIPT_DIR/lib/common.sh"
@@ -52,7 +52,7 @@ check_mac_configuration() {
                     has_issues=true
                 fi
             else
-                printf "${RED}✗ MAC: NOT CONFIGURED${NC}\n"
+                printf "%s✗ MAC: NOT CONFIGURED%s\n" "$RED" "$NC"
                 has_issues=true
             fi
             
@@ -145,25 +145,28 @@ check_vm_mac_addresses() {
     local pfsense_vm_id="${PFSENSE_VM_ID:-100}"
     if qm status "$pfsense_vm_id" >/dev/null 2>&1; then
         echo "pfSense VM (ID: $pfsense_vm_id):"
-        local vm_config=$(qm config "$pfsense_vm_id" 2>/dev/null || echo "")
+        local vm_config
+        vm_config=$(qm config "$pfsense_vm_id" 2>/dev/null || echo "")
         
         if [[ -n "$vm_config" ]]; then
             # Check WAN interface (net0)
-            local net0_config=$(echo "$vm_config" | grep "^net0:" || echo "")
+            local net0_config
+            net0_config=$(echo "$vm_config" | grep "^net0:" || echo "")
             if [[ -n "$net0_config" ]]; then
-                local vm_mac=$(echo "$net0_config" | grep -o 'macaddr=[^,]*' | cut -d= -f2 || echo "")
+                local vm_mac
+                vm_mac=$(echo "$net0_config" | grep -o 'macaddr=[^,]*' | cut -d= -f2 || echo "")
                 if [[ -n "$vm_mac" ]]; then
                     printf "  WAN interface MAC: %s" "$vm_mac"
                     if [[ -n "${ADDITIONAL_MACS_ARRAY[0]:-}" ]] && [[ "$vm_mac" == "${ADDITIONAL_MACS_ARRAY[0]}" ]]; then
-                        printf " ${GREEN}✓ MATCHES${NC}\n"
+                        printf " %s✓ MATCHES%s\n" "$GREEN" "$NC"
                     else
-                        printf " ${RED}✗ MISMATCH${NC}\n"
+                        printf " %s✗ MISMATCH%s\n" "$RED" "$NC"
                         if [[ -n "${ADDITIONAL_MACS_ARRAY[0]:-}" ]]; then
                             printf "    Expected: %s\n" "${ADDITIONAL_MACS_ARRAY[0]}"
                         fi
                     fi
                 else
-                    printf "  WAN interface MAC: ${YELLOW}auto-generated${NC}\n"
+                    printf "  WAN interface MAC: %sauto-generated%s\n" "$YELLOW" "$NC"
                 fi
             fi
         fi
@@ -177,25 +180,28 @@ check_vm_mac_addresses() {
     local vm_id="${FIREWALL_ADMIN_VM_ID:-200}"
     if qm status "$vm_id" >/dev/null 2>&1; then
         echo "Firewall Admin VM (ID: $vm_id):"
-        local vm_config=$(qm config "$vm_id" 2>/dev/null || echo "")
+        local vm_config
+        vm_config=$(qm config "$vm_id" 2>/dev/null || echo "")
         
         if [[ -n "$vm_config" ]]; then
             # Check WAN interface (net1)
-            local net1_config=$(echo "$vm_config" | grep "^net1:" || echo "")
+            local net1_config
+            net1_config=$(echo "$vm_config" | grep "^net1:" || echo "")
             if [[ -n "$net1_config" ]]; then
-                local vm_mac=$(echo "$net1_config" | grep -o 'macaddr=[^,]*' | cut -d= -f2 || echo "")
+                local vm_mac
+                vm_mac=$(echo "$net1_config" | grep -o 'macaddr=[^,]*' | cut -d= -f2 || echo "")
                 if [[ -n "$vm_mac" ]]; then
                     printf "  WAN interface MAC: %s" "$vm_mac"
                     if [[ -n "${ADDITIONAL_MACS_ARRAY[1]:-}" ]] && [[ "$vm_mac" == "${ADDITIONAL_MACS_ARRAY[1]}" ]]; then
-                        printf " ${GREEN}✓ MATCHES${NC}\n"
+                        printf " %s✓ MATCHES%s\n" "$GREEN" "$NC"
                     else
-                        printf " ${RED}✗ MISMATCH${NC}\n"
+                        printf " %s✗ MISMATCH%s\n" "$RED" "$NC"
                         if [[ -n "${ADDITIONAL_MACS_ARRAY[1]:-}" ]]; then
                             printf "    Expected: %s\n" "${ADDITIONAL_MACS_ARRAY[1]}"
                         fi
                     fi
                 else
-                    printf "  WAN interface MAC: ${YELLOW}auto-generated${NC}\n"
+                    printf "  WAN interface MAC: %sauto-generated%s\n" "$YELLOW" "$NC"
                 fi
             fi
         fi
@@ -212,7 +218,6 @@ main() {
     echo "========================================"
     
     local config_ok=true
-    local vm_ok=true
     
     # Check configuration
     if ! check_mac_configuration; then
@@ -221,9 +226,7 @@ main() {
     
     # Check VM/container assignments if VMs exist
     if command -v qm >/dev/null 2>&1; then
-        if ! check_vm_mac_addresses; then
-            vm_ok=true  # Don't fail if VMs don't exist yet
-        fi
+        check_vm_mac_addresses || true  # Don't fail if VMs don't exist yet
     fi
     
     echo
@@ -250,7 +253,11 @@ main() {
         echo "The setup will not work properly without correct MAC addresses!"
     fi
     
-    return $([[ "$config_ok" == "true" ]] && echo 0 || echo 1)
+    if [[ "$config_ok" == "true" ]]; then
+        return 0
+    else
+        return 1
+    fi
 }
 
 # Help function

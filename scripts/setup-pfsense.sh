@@ -5,8 +5,8 @@
 
 set -euo pipefail
 
-readonly SCRIPT_NAME="setup-pfsense"
-readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+readonly SCRIPT_DIR
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Source common functions
 source "$SCRIPT_DIR/lib/common.sh"

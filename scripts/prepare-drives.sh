@@ -3,7 +3,7 @@
 # Hetzner Proxmox Setup - Drive Preparation and RAID Configuration
 # This script handles drive preparation and RAID setup for various configurations
 
-set -uo pipefail
+set -euo pipefail
 
 # Error handler
 error_handler() {
@@ -11,18 +11,20 @@ error_handler() {
     local error_code=$2
     echo "[ERROR] Script failed at line $line_no with exit code $error_code" >&2
     echo "[ERROR] Drive preparation failed" >&2
-    exit $error_code
+    exit "$error_code"
 }
 
-readonly SCRIPT_NAME="prepare-drives"
-readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+readonly SCRIPT_DIR
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly PROJECT_ROOT
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
 # Source common functions
 if [[ ! -f "$PROJECT_ROOT/lib/common.sh" ]]; then
     echo "[ERROR] Common library not found: $PROJECT_ROOT/lib/common.sh" >&2
     exit 1
 fi
+# shellcheck disable=SC1091
 source "$PROJECT_ROOT/lib/common.sh"
 
 # Default values
@@ -132,7 +134,8 @@ detect_drives() {
         exit 1
     fi
     
-    local drives=($drives_raw)
+    local drives
+    read -ra drives <<< "$drives_raw"
     
     if [[ ${#drives[@]} -eq 0 ]]; then
         log "ERROR" "No suitable drives found after filtering"
@@ -143,8 +146,10 @@ detect_drives() {
     {
         log "INFO" "Found ${#drives[@]} drives:"
         for drive in "${drives[@]}"; do
-            local size=$(lsblk -dn -o SIZE "$drive" 2>/dev/null || echo "unknown")
-            local model=$(lsblk -dn -o MODEL "$drive" 2>/dev/null | sed 's/[[:space:]]\+/ /g' || echo "unknown")
+            local size
+            local model
+            size=$(lsblk -dn -o SIZE "$drive" 2>/dev/null || echo "unknown")
+            model=$(lsblk -dn -o MODEL "$drive" 2>/dev/null | sed 's/[[:space:]]\+/ /g' || echo "unknown")
             log "INFO" "  $drive: $size ($model)"
         done
     } >&2
@@ -155,7 +160,7 @@ detect_drives() {
 
 # Analyze drive configuration
 analyze_drives() {
-    local drives=($@)
+    local drives=("$@")
     
     if [[ ${#drives[@]} -eq 0 ]]; then
         log "ERROR" "No drives provided to analyze"
@@ -182,7 +187,6 @@ analyze_drives() {
         fi
         
         local size_gb=$((size_bytes / 1024 / 1024 / 1024))
-        local size_tb=$((size_gb / 1024))
         
         # Create size categories with some tolerance
         local size_category
@@ -218,20 +222,23 @@ analyze_drives() {
     # Display analysis results
     log "INFO" "Drive analysis completed:"
     for category in "${!drive_groups[@]}"; do
-        local drives_in_category=(${drive_groups[$category]})
+        local drives_in_category
+        IFS=' ' read -ra drives_in_category <<< "${drive_groups[$category]}"
         local count=${#drives_in_category[@]}
         log "INFO" "  $category: ${count}x drives (${drive_groups[$category]})"
     done
     
     # Store results globally for use in other functions
     if declare -p drive_groups >/dev/null 2>&1; then
-        export DRIVE_GROUPS_STR=$(declare -p drive_groups)
+        export DRIVE_GROUPS_STR
+        DRIVE_GROUPS_STR=$(declare -p drive_groups)
     else
         export DRIVE_GROUPS_STR="declare -A drive_groups=()"
     fi
     
     if declare -p drive_sizes_gb >/dev/null 2>&1; then
-        export DRIVE_SIZES_STR=$(declare -p drive_sizes_gb)
+        export DRIVE_SIZES_STR
+        DRIVE_SIZES_STR=$(declare -p drive_sizes_gb)
     else
         export DRIVE_SIZES_STR="declare -A drive_sizes_gb=()"
     fi
@@ -259,7 +266,6 @@ safe_eval_drive_groups() {
         declare -A drive_sizes_gb=()
     fi
 }
-}
 
 # Validate RAID configuration
 validate_raid_config() {
@@ -279,7 +285,8 @@ validate_raid_config() {
             
             # Check that both groups have at least 2 drives
             for category in "${!drive_groups[@]}"; do
-                local drives_in_category=(${drive_groups[$category]})
+                local drives_in_category
+                IFS=' ' read -ra drives_in_category <<< "${drive_groups[$category]}"
                 local count=${#drives_in_category[@]}
                 if [[ $count -lt 2 ]]; then
                     log "ERROR" "Dual RAID 1 requires at least 2 drives in each size group"
@@ -294,7 +301,8 @@ validate_raid_config() {
                 log "ERROR" "No drives found for category: $category"
                 return 1
             fi
-            local drives_in_category=(${drive_groups[$category]})
+            local drives_in_category
+            IFS=' ' read -ra drives_in_category <<< "${drive_groups[$category]}"
             local count=${#drives_in_category[@]}
             if [[ $count -lt 2 ]]; then
                 log "ERROR" "RAID 1 requires at least 2 drives"
@@ -308,7 +316,8 @@ validate_raid_config() {
                 log "ERROR" "No drives found for category: $category"
                 return 1
             fi
-            local drives_in_category=(${drive_groups[$category]})
+            local drives_in_category
+            IFS=' ' read -ra drives_in_category <<< "${drive_groups[$category]}"
             local count=${#drives_in_category[@]}
             if [[ $count -lt 3 ]]; then
                 log "ERROR" "RAID 5 requires at least 3 drives"
@@ -322,7 +331,8 @@ validate_raid_config() {
                 log "ERROR" "No drives found for category: $category"
                 return 1
             fi
-            local drives_in_category=(${drive_groups[$category]})
+            local drives_in_category
+            IFS=' ' read -ra drives_in_category <<< "${drive_groups[$category]}"
             local count=${#drives_in_category[@]}
             if [[ $count -lt 4 ]]; then
                 log "ERROR" "RAID 6/10 requires at least 4 drives"
@@ -336,7 +346,8 @@ validate_raid_config() {
                 log "ERROR" "No drives found for category: $category"
                 return 1
             fi
-            local drives_in_category=(${drive_groups[$category]})
+            local drives_in_category
+            IFS=' ' read -ra drives_in_category <<< "${drive_groups[$category]}"
             local count=${#drives_in_category[@]}
             if [[ $count -lt 2 ]]; then
                 log "ERROR" "ZFS mirror requires at least 2 drives"
@@ -384,15 +395,19 @@ show_drive_status() {
         return 0
     fi
     
-    local drives=($drives_raw)
+    local drives
+    read -ra drives <<< "$drives_raw"
     local drive_count=0
     
     for drive_name in "${drives[@]}"; do
         local drive="/dev/$drive_name"
         if [[ -b "$drive" ]]; then
-            local size=$(lsblk -dn -o SIZE "$drive" 2>/dev/null || echo "unknown")
-            local model=$(lsblk -dn -o MODEL "$drive" 2>/dev/null | sed 's/[[:space:]]\+/ /g' | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//' || echo "unknown")
-            local serial=$(lsblk -dn -o SERIAL "$drive" 2>/dev/null || echo "unknown")
+            local size
+            local model
+            local serial
+            size=$(lsblk -dn -o SIZE "$drive" 2>/dev/null || echo "unknown")
+            model=$(lsblk -dn -o MODEL "$drive" 2>/dev/null | sed 's/[[:space:]]\+/ /g' | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//' || echo "unknown")
+            serial=$(lsblk -dn -o SERIAL "$drive" 2>/dev/null || echo "unknown")
             
             # Clean up and truncate long strings for display
             model="${model:0:20}"
@@ -509,11 +524,14 @@ preview_raid_config() {
 
 # Preview functions for different RAID types
 preview_dual_raid1() {
-    local categories=(${!drive_groups[@]})
+    local categories
+    read -ra categories <<< "${!drive_groups[*]}"
     local cat1="${categories[0]}"
     local cat2="${categories[1]}"
-    local drives1=(${drive_groups[$cat1]})
-    local drives2=(${drive_groups[$cat2]})
+    local drives1
+    local drives2
+    IFS=' ' read -ra drives1 <<< "${drive_groups[$cat1]}"
+    IFS=' ' read -ra drives2 <<< "${drive_groups[$cat2]}"
     local size1=${drive_sizes_gb[$cat1]}
     local size2=${drive_sizes_gb[$cat2]}
     
@@ -542,7 +560,8 @@ preview_dual_raid1() {
 preview_single_raid() {
     local category="$1"
     local raid_level="$2"
-    local drives=(${drive_groups[$category]})
+    local drives
+    IFS=' ' read -ra drives <<< "${drive_groups[$category]}"
     local count=${#drives[@]}
     local size_gb=${drive_sizes_gb[$category]}
     local usable_capacity
@@ -551,7 +570,7 @@ preview_single_raid() {
         "1") usable_capacity=$((size_gb / 2)) ;;
         "5") usable_capacity=$(((count - 1) * size_gb)) ;;
         "6") usable_capacity=$(((count - 2) * size_gb)) ;;
-        "10") usable_capacity=$((count / 2 * size_gb)) ;;
+        "10") usable_capacity=$((count * size_gb / 2)) ;;
     esac
     
     log "INFO" "Configuration Details:"
@@ -568,7 +587,8 @@ preview_single_raid() {
 
 preview_zfs_config() {
     local category="$1"
-    local drives=(${drive_groups[$category]})
+    local drives
+    IFS=' ' read -ra drives <<< "${drive_groups[$category]}"
     local count=${#drives[@]}
     local size_gb=${drive_sizes_gb[$category]}
     local usable_capacity=$((size_gb / 2))  # ZFS mirror
@@ -584,7 +604,8 @@ preview_zfs_config() {
 
 preview_individual_config() {
     local category="$1"
-    local drives=(${drive_groups[$category]})
+    local drives
+    IFS=' ' read -ra drives <<< "${drive_groups[$category]}"
     local count=${#drives[@]}
     local size_gb=${drive_sizes_gb[$category]}
     
@@ -603,7 +624,8 @@ preview_mixed_optimal() {
     
     # Find the largest groups that can form RAID
     for category in "${!drive_groups[@]}"; do
-        local drives=(${drive_groups[$category]})
+        local drives
+        IFS=' ' read -ra drives <<< "${drive_groups[$category]}"
         local count=${#drives[@]}
         local size_gb=${drive_sizes_gb[$category]}
         
@@ -620,7 +642,8 @@ preview_no_raid() {
     log "INFO" "  No RAID - Individual Drives:"
     
     for category in "${!drive_groups[@]}"; do
-        local drives=(${drive_groups[$category]})
+        local drives
+        IFS=' ' read -ra drives <<< "${drive_groups[$category]}"
         local count=${#drives[@]}
         local size_gb=${drive_sizes_gb[$category]}
         log "INFO" "    - ${count}x $category: Individual ${size_gb}GB drives"
@@ -642,17 +665,16 @@ suggest_best_config() {
     local total_drives=0
     local group_count=0
     local largest_group_size=0
-    local largest_group_category=""
     
     for category in "${!drive_groups[@]}"; do
-        local drives_in_category=(${drive_groups[$category]})
+        local drives_in_category
+        IFS=' ' read -ra drives_in_category <<< "${drive_groups[$category]}"
         local count=${#drives_in_category[@]}
         total_drives=$((total_drives + count))
         group_count=$((group_count + 1))
         
         if [[ $count -gt $largest_group_size ]]; then
             largest_group_size=$count
-            largest_group_category="$category"
         fi
     done
     
@@ -662,8 +684,10 @@ suggest_best_config() {
     # Recommendation logic based on drive configuration
     if [[ $group_count -eq 1 ]]; then
         # All drives are the same size
-        local category="${!drive_groups[@]}"
-        local drives_in_category=(${drive_groups[$category]})
+        local category
+        category="${!drive_groups[*]}"
+        local drives_in_category
+        IFS=' ' read -ra drives_in_category <<< "${drive_groups[$category]}"
         local count=${#drives_in_category[@]}
         
         if [[ $count -eq 2 ]]; then
@@ -697,11 +721,14 @@ suggest_best_config() {
         
     elif [[ $group_count -eq 2 ]]; then
         # Two different drive sizes
-        local categories=(${!drive_groups[@]})
+        local categories
+        read -ra categories <<< "${!drive_groups[*]}"
         local cat1="${categories[0]}"
         local cat2="${categories[1]}"
-        local drives1=(${drive_groups[$cat1]})
-        local drives2=(${drive_groups[$cat2]})
+        local drives1
+        local drives2
+        IFS=' ' read -ra drives1 <<< "${drive_groups[$cat1]}"
+        IFS=' ' read -ra drives2 <<< "${drive_groups[$cat2]}"
         local count1=${#drives1[@]}
         local count2=${#drives2[@]}
         
@@ -749,7 +776,6 @@ suggest_best_config() {
     
     for i in "${!recommendations[@]}"; do
         local rec="${recommendations[$i]}"
-        local config_name="${rec%%:*}"
         local description="${rec#*:}"
         log "INFO" "  $description"
     done
@@ -793,7 +819,7 @@ execute_raid_config() {
         echo
         log "WARNING" "⚠️  FINAL WARNING: This will DESTROY ALL DATA on the selected drives!"
         log "WARNING" "⚠️  Are you absolutely sure you want to proceed?"
-        read -p "Type 'YES' to continue: " confirmation
+        read -r -p "Type 'YES' to continue: " confirmation
         if [[ "$confirmation" != "YES" ]]; then
             log "INFO" "Operation cancelled by user"
             exit 0
@@ -859,7 +885,8 @@ execute_dual_raid1() {
     safe_eval_drive_groups
     
     # Find the two drive groups
-    local categories=(${!drive_groups[@]})
+    local categories
+    read -ra categories <<< "${!drive_groups[*]}"
     local large_drives small_drives
     
     if [[ ${#categories[@]} -ne 2 ]]; then
@@ -874,13 +901,13 @@ execute_dual_raid1() {
     local size2=${drive_sizes_gb[$cat2]}
     
     if [[ $size1 -gt $size2 ]]; then
-        large_drives=(${drive_groups[$cat1]})
-        small_drives=(${drive_groups[$cat2]})
+        IFS=' ' read -ra large_drives <<< "${drive_groups[$cat1]}"
+        IFS=' ' read -ra small_drives <<< "${drive_groups[$cat2]}"
         log "INFO" "Large drives ($cat1): ${large_drives[*]}"
         log "INFO" "Small drives ($cat2): ${small_drives[*]}"
     else
-        large_drives=(${drive_groups[$cat2]})
-        small_drives=(${drive_groups[$cat1]})
+        IFS=' ' read -ra large_drives <<< "${drive_groups[$cat2]}"
+        IFS=' ' read -ra small_drives <<< "${drive_groups[$cat1]}"
         log "INFO" "Large drives ($cat2): ${large_drives[*]}"
         log "INFO" "Small drives ($cat1): ${small_drives[*]}"
     fi
@@ -991,7 +1018,8 @@ execute_single_raid1() {
         return 1
     fi
     
-    local drives_in_category=(${drive_groups[$category]})
+    local drives_in_category
+    IFS=' ' read -ra drives_in_category <<< "${drive_groups[$category]}"
     local size=${drive_sizes_gb[$category]}
     
     if [[ ${#drives_in_category[@]} -lt 2 ]]; then
@@ -1096,7 +1124,7 @@ cleanup_existing_raid() {
     # Stop all MD arrays
     if [[ -f /proc/mdstat ]]; then
         log "INFO" "Stopping existing RAID arrays..."
-        for md_device in $(grep "^md" /proc/mdstat | cut -d: -f1); do
+        grep "^md" /proc/mdstat | cut -d: -f1 | while read -r md_device; do
             log "INFO" "  Stopping /dev/$md_device"
             mdadm --stop "/dev/$md_device" 2>/dev/null || true
         done
@@ -1168,7 +1196,8 @@ execute_zfs_mirror() {
         return 1
     fi
     
-    local drives_in_category=(${drive_groups[$category]})
+    local drives_in_category
+    IFS=' ' read -ra drives_in_category <<< "${drive_groups[$category]}"
     local size=${drive_sizes_gb[$category]}
     
     if [[ ${#drives_in_category[@]} -lt 2 ]]; then
@@ -1222,7 +1251,8 @@ execute_raid6() {
         return 1
     fi
     
-    local drives_in_category=(${drive_groups[$category]})
+    local drives_in_category
+    IFS=' ' read -ra drives_in_category <<< "${drive_groups[$category]}"
     local size=${drive_sizes_gb[$category]}
     
     if [[ ${#drives_in_category[@]} -lt 4 ]]; then
@@ -1266,7 +1296,8 @@ execute_raid5() {
         return 1
     fi
     
-    local drives_in_category=(${drive_groups[$category]})
+    local drives_in_category
+    IFS=' ' read -ra drives_in_category <<< "${drive_groups[$category]}"
     local size=${drive_sizes_gb[$category]}
     
     if [[ ${#drives_in_category[@]} -lt 3 ]]; then
@@ -1310,7 +1341,8 @@ execute_raid10() {
         return 1
     fi
     
-    local drives_in_category=(${drive_groups[$category]})
+    local drives_in_category
+    IFS=' ' read -ra drives_in_category <<< "${drive_groups[$category]}"
     local size=${drive_sizes_gb[$category]}
     
     if [[ ${#drives_in_category[@]} -lt 4 ]]; then
@@ -1359,7 +1391,8 @@ execute_individual() {
         return 1
     fi
     
-    local drives_in_category=(${drive_groups[$category]})
+    local drives_in_category
+    IFS=' ' read -ra drives_in_category <<< "${drive_groups[$category]}"
     local size=${drive_sizes_gb[$category]}
     
     log "INFO" "Setting up ${#drives_in_category[@]} individual drives: ${drives_in_category[*]}"
@@ -1397,7 +1430,8 @@ execute_no_raid() {
     
     # Setup all drives individually
     for category in "${!drive_groups[@]}"; do
-        local drives_in_category=(${drive_groups[$category]})
+        local drives_in_category
+        IFS=' ' read -ra drives_in_category <<< "${drive_groups[$category]}"
         local size=${drive_sizes_gb[$category]}
         
         for drive in "${drives_in_category[@]}"; do
@@ -1432,7 +1466,8 @@ execute_mixed_optimal() {
     # Process each drive group
     local array_index=0
     for category in "${!drive_groups[@]}"; do
-        local drives_in_category=(${drive_groups[$category]})
+        local drives_in_category
+        IFS=' ' read -ra drives_in_category <<< "${drive_groups[$category]}"
         local count=${#drives_in_category[@]}
         local size=${drive_sizes_gb[$category]}
         
@@ -1533,7 +1568,8 @@ interactive_config_selection() {
     local group_count=${#drive_groups[@]}
     
     for category in "${!drive_groups[@]}"; do
-        local drives_in_category=(${drive_groups[$category]})
+        local drives_in_category
+        IFS=' ' read -ra drives_in_category <<< "${drive_groups[$category]}"
         local count=${#drives_in_category[@]}
         local size_gb=${drive_sizes_gb[$category]}
         
@@ -1560,7 +1596,8 @@ interactive_config_selection() {
     if [[ $group_count -eq 2 ]]; then
         local can_dual_raid=true
         for category in "${!drive_groups[@]}"; do
-            local drives_in_category=(${drive_groups[$category]})
+            local drives_in_category
+            IFS=' ' read -ra drives_in_category <<< "${drive_groups[$category]}"
             local count=${#drives_in_category[@]}
             if [[ $count -lt 2 ]]; then
                 can_dual_raid=false
@@ -1644,7 +1681,8 @@ confirm_operation() {
     safe_eval_drive_groups
     log "WARNING" "Drives that will be affected:"
     for category in "${!drive_groups[@]}"; do
-        local drives_in_category=(${drive_groups[$category]})
+        local drives_in_category
+        IFS=' ' read -ra drives_in_category <<< "${drive_groups[$category]}"
         log "WARNING" "  ${category}: ${drives_in_category[*]}"
     done
     
@@ -1692,7 +1730,8 @@ perform_safety_checks() {
     
     # Check for active VMs or containers
     if command -v qm >/dev/null 2>&1; then
-        local running_vms=$(qm list 2>/dev/null | grep -c "running" || echo "0")
+        local running_vms
+        running_vms=$(qm list 2>/dev/null | grep -c "running" || echo "0")
         if [[ "$running_vms" -gt 0 ]]; then
             log "WARNING" "Found $running_vms running VMs"
             log "WARNING" "Drive reconfiguration may affect VM storage"
@@ -1706,9 +1745,10 @@ perform_safety_checks() {
     fi
     
     # Check available space for backups
-    local root_space=$(df / | awk 'NR==2 {print $4}')
+    local root_space
+    root_space=$(df / | awk 'NR==2 {print $4}')
     if [[ "$root_space" -lt 1048576 ]]; then  # Less than 1GB
-        log "WARNING" "Low disk space on root filesystem ($(($root_space / 1024))MB available)"
+        log "WARNING" "Low disk space on root filesystem ($((root_space / 1024))MB available)"
         log "WARNING" "May not have enough space for emergency backups"
     fi
     
@@ -1717,7 +1757,8 @@ perform_safety_checks() {
     
     local mounted_drives=()
     for category in "${!drive_groups[@]}"; do
-        local drives_in_category=(${drive_groups[$category]})
+        local drives_in_category
+        IFS=' ' read -ra drives_in_category <<< "${drive_groups[$category]}"
         for drive in "${drives_in_category[@]}"; do
             if mount | grep -q "^$drive"; then
                 mounted_drives+=("$drive")
@@ -1746,7 +1787,8 @@ perform_safety_checks() {
 create_emergency_info() {
     log "INFO" "📝 Creating emergency restore information..."
     
-    local backup_dir="/root/drive-backup-$(date +%Y%m%d-%H%M%S)"
+    local backup_dir
+    backup_dir="/root/drive-backup-$(date +%Y%m%d-%H%M%S)"
     mkdir -p "$backup_dir"
     
     # Save current drive information
@@ -1759,7 +1801,8 @@ create_emergency_info() {
         
         safe_eval_drive_groups
         for category in "${!drive_groups[@]}"; do
-            local drives_in_category=(${drive_groups[$category]})
+            local drives_in_category
+            IFS=' ' read -ra drives_in_category <<< "${drive_groups[$category]}"
             for drive in "${drives_in_category[@]}"; do
                 echo ""
                 echo "## Drive: $drive"
@@ -1849,7 +1892,7 @@ main() {
     # Detect and analyze drives
     log "INFO" "🔍 Detecting available drives..."
     local drives
-    drives=($(detect_drives))
+    mapfile -t drives < <(detect_drives)
     
     if [[ ${#drives[@]} -eq 0 ]]; then
         log "ERROR" "No suitable drives found"

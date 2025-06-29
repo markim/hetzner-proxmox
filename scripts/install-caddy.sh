@@ -5,8 +5,6 @@
 
 set -euo pipefail
 
-readonly SCRIPT_NAME="install-caddy"
-
 # Source common functions
 source "$(dirname "$0")/../lib/common.sh"
 
@@ -64,7 +62,8 @@ install_caddy() {
         return 1
     fi
     
-    local caddy_version=$(caddy version | head -n1)
+    local caddy_version
+    caddy_version=$(caddy version | head -n1)
     log "INFO" "Caddy installed successfully: $caddy_version"
     
     # Create caddy configuration directory if it doesn't exist

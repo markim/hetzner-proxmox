@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Debug script to test drive detection
-set -uo pipefail
+set -euo pipefail
 
 echo "Testing drive detection commands..."
 
@@ -16,8 +16,9 @@ drives_raw=$(lsblk -dn -o NAME 2>/dev/null | grep -E '^(sd|nvme|vd)' || echo "")
 echo "Raw drives: '$drives_raw'"
 
 if [[ -n "$drives_raw" ]]; then
-    drives=($drives_raw)
-    echo "Drive array: ${drives[@]}"
+    # Use mapfile to safely populate the array
+    mapfile -t drives <<< "$drives_raw"
+    echo "Drive array: ${drives[*]}"
     
     echo "4. Testing drive info for each drive:"
     for drive_name in "${drives[@]}"; do

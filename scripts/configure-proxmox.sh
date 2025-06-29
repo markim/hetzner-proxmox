@@ -5,8 +5,6 @@
 
 set -euo pipefail
 
-readonly SCRIPT_NAME="configure-proxmox"
-
 # Source common functions
 source "$(dirname "$0")/../lib/common.sh"
 

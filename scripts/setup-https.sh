@@ -5,8 +5,6 @@
 
 set -euo pipefail
 
-readonly SCRIPT_NAME="setup-https"
-
 # Source common functions
 source "$(dirname "$0")/../lib/common.sh"
 
@@ -33,7 +31,8 @@ validate_required_vars() {
 configure_caddy() {
     log "INFO" "Configuring Caddy for Proxmox reverse proxy..."
     
-    local template_file="$(dirname "$0")/../config/Caddyfile.template"
+    local template_file
+    template_file="$(dirname "$0")/../config/Caddyfile.template"
     local caddy_config="$CADDY_CONFIG_DIR/Caddyfile"
     
     # Backup existing config if it exists
@@ -60,8 +59,7 @@ test_caddy_config() {
     
     # Validate configuration with reduced output
     local validation_output
-    validation_output=$(caddy validate --config "$CADDY_CONFIG_DIR/Caddyfile" 2>&1)
-    if [[ $? -eq 0 ]]; then
+    if validation_output=$(caddy validate --config "$CADDY_CONFIG_DIR/Caddyfile" 2>&1); then
         log "INFO" "Caddy configuration is valid"
     else
         log "ERROR" "Caddy configuration is invalid"

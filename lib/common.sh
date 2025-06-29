@@ -23,6 +23,7 @@ load_env() {
     if [[ -f "$env_file" ]]; then
         log "INFO" "Loading environment from $env_file"
         set -a
+        # shellcheck disable=SC1090
         source "$env_file"
         set +a
     else
@@ -42,7 +43,8 @@ log() {
     local level="$1"
     shift
     local message="$*"
-    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    local timestamp
+    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
     local script_name="${SCRIPT_NAME:-$(basename "$0")}"
     
     # Color output for terminal
@@ -117,9 +119,7 @@ process_template() {
     log "INFO" "Processing template: $template_file -> $output_file"
     
     # Use envsubst to replace environment variables
-    envsubst < "$template_file" > "$output_file"
-    
-    if [[ $? -eq 0 ]]; then
+    if envsubst < "$template_file" > "$output_file"; then
         log "INFO" "Template processed successfully"
     else
         log "ERROR" "Failed to process template"
@@ -133,13 +133,12 @@ backup_file() {
     local backup_dir="${2:-$(dirname "$file")}"
     
     if [[ -f "$file" ]]; then
-        local backup_name="$(basename "$file").backup.$(date +%Y%m%d_%H%M%S)"
+        local backup_name
+        backup_name="$(basename "$file").backup.$(date +%Y%m%d_%H%M%S)"
         local backup_path="$backup_dir/$backup_name"
         
         log "INFO" "Backing up $file to $backup_path"
-        cp "$file" "$backup_path"
-        
-        if [[ $? -eq 0 ]]; then
+        if cp "$file" "$backup_path"; then
             log "INFO" "Backup created successfully"
         else
             log "ERROR" "Failed to create backup"
