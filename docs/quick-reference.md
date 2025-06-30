@@ -23,7 +23,6 @@ sudo ./install.sh --firewalladmin    # Admin container
 | Task | Command |
 |------|---------|
 | **Check MAC config** | `./install.sh --check-mac` |
-| **Preview changes** | `./install.sh --network --dry-run` |
 | **Check service status** | `systemctl status caddy` |
 | **View logs** | `journalctl -u caddy -f` |
 | **List VMs** | `qm list` |

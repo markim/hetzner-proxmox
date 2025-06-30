@@ -630,90 +630,6 @@ debug_config_file() {
 
 # Apply network configuration with safety measures
 apply_network_config() {
-    if [[ "${DRY_RUN:-false}" == "true" ]]; then
-        log "INFO" "=== DRY RUN MODE - SHOWING PLANNED CHANGES ==="
-        log "INFO" ""
-        log "INFO" "Current network configuration:"
-        log "INFO" "Interface: $SSH_INTERFACE"
-        log "INFO" "Current IP: $CURRENT_IP"
-        log "INFO" "Current Gateway: $(ip route | grep default | awk '{print $3}' | head -n1)"
-        log "INFO" ""
-        
-        if [[ -n "${ADDITIONAL_IPS_ARRAY[*]:-}" && ${#ADDITIONAL_IPS_ARRAY[@]} -gt 0 ]]; then
-            log "INFO" "Additional IPs that would be configured:"
-            for i in "${!ADDITIONAL_IPS_ARRAY[@]}"; do
-                local ip="${ADDITIONAL_IPS_ARRAY[$i]}"
-                local gateway="${ADDITIONAL_GATEWAYS_ARRAY[$i]}"
-                local netmask="${ADDITIONAL_NETMASKS_ARRAY[$i]}"
-                local cidr
-                cidr=$(netmask_to_cidr "$netmask")
-                log "INFO" "  - IP: $ip/$cidr, Gateway: $gateway"
-            done
-        else
-            log "INFO" "No additional IPs to configure"
-        fi
-        
-        log "INFO" ""
-        log "INFO" "Generated configuration file contents:"
-        log "INFO" "=========================================="
-        while IFS= read -r line; do
-            log "INFO" "$line"
-        done < "$NEW_INTERFACES_CONFIG"
-        log "INFO" "=========================================="
-        log "INFO" ""
-        
-        # Validate configuration syntax
-        log "INFO" "Validating configuration syntax..."
-        
-        # Use our comprehensive validation function
-        if ! validate_interfaces_syntax "$NEW_INTERFACES_CONFIG"; then
-            log "ERROR" "✗ Configuration structure validation failed"
-            log "ERROR" "The generated configuration has structural errors"
-            return 1
-        fi
-        
-        # Also test with ifup if available
-        if command -v ifup >/dev/null 2>&1; then
-            log "INFO" "Testing configuration with ifup validation..."
-            local test_output
-            test_output=$(ifup --verbose --no-act --force --all --interfaces="$NEW_INTERFACES_CONFIG" 2>&1)
-            local ifup_exit_code=$?
-            
-            if [[ $ifup_exit_code -eq 0 ]]; then
-                log "INFO" "✓ Configuration syntax validation passed"
-                if [[ "${LOG_LEVEL:-}" == "DEBUG" ]]; then
-                    log "DEBUG" "ifup validation details:"
-                    echo "$test_output" | while IFS= read -r line; do
-                        log "DEBUG" "  $line"
-                    done
-                fi
-            else
-                log "ERROR" "✗ Configuration syntax validation failed"
-                log "ERROR" "ifup error output:"
-                echo "$test_output" | while IFS= read -r line; do
-                    log "ERROR" "  $line"
-                done
-                return 1
-            fi
-        else
-            log "WARN" "ifup not available for syntax validation"
-        fi
-        
-        # Check if configuration preserves current connectivity
-        if grep -q "$CURRENT_IP" "$NEW_INTERFACES_CONFIG" && grep -q "$(ip route | grep default | awk '{print $3}' | head -n1)" "$NEW_INTERFACES_CONFIG"; then
-            log "INFO" "✓ Current SSH connectivity would be preserved"
-        else
-            log "ERROR" "✗ Configuration might break SSH connectivity"
-            log "ERROR" "Current IP or gateway not found in new configuration"
-            return 1
-        fi
-        
-        log "INFO" ""
-        log "INFO" "DRY RUN completed - no changes were made"
-        log "INFO" "To apply these changes, run without --dry-run flag"
-        return 0
-    fi
-    
     log "WARN" "About to apply network configuration changes"
     log "WARN" "This could potentially interrupt SSH connectivity"
     log "INFO" "Backup available at: $INTERFACES_BACKUP"
@@ -955,11 +871,6 @@ show_network_status() {
 parse_arguments() {
     while [[ $# -gt 0 ]]; do
         case $1 in
-            --dry-run)
-                export DRY_RUN=true
-                log "INFO" "Dry run mode enabled"
-                shift
-                ;;
             --generate-config)
                 generate_config_template
                 exit 0
@@ -990,7 +901,6 @@ Usage: $0 [OPTIONS]
 Configure network settings for Hetzner Proxmox setup.
 
 OPTIONS:
-    --dry-run            Show what would be done without making changes
     --generate-config    Create a configuration file template
     --verbose, -v        Enable verbose output
     --help, -h           Show this help message
@@ -1023,7 +933,6 @@ ENVIRONMENT:
 
 EXAMPLES:
     $0                      # Normal execution
-    $0 --dry-run            # Preview changes without applying
     $0 --generate-config    # Create configuration file template
     $0 --verbose            # Show detailed output
 
@@ -1096,30 +1005,23 @@ main() {
     }
     
     # Apply configuration
-    if [[ "${DRY_RUN:-false}" != "true" ]]; then
-        log "WARN" "=== NETWORK CONFIGURATION WARNING ==="
-        log "WARN" "This operation will modify network settings"
-        log "WARN" "SSH connectivity may be temporarily interrupted"
-        log "WARN" "Backup is available at: $INTERFACES_BACKUP"
-        log "WARN" "Emergency restore script: /root/restore-network.sh"
-        log "WARN" ""
-        log "WARN" "STRONGLY RECOMMENDED: Run with --dry-run first to validate changes"
-        log "WARN" ""
-        log "WARN" "Continue? (Press Enter to continue, Ctrl+C to abort)"
-        read -r
-    fi
+    log "WARN" "=== NETWORK CONFIGURATION WARNING ==="
+    log "WARN" "This operation will modify network settings"
+    log "WARN" "SSH connectivity may be temporarily interrupted"
+    log "WARN" "Backup is available at: $INTERFACES_BACKUP"
+    log "WARN" "Emergency restore script: /root/restore-network.sh"
+    log "WARN" ""
+    log "WARN" ""
+    log "WARN" "Continue? (Press Enter to continue, Ctrl+C to abort)"
+    read -r
     
     apply_network_config
     configure_proxmox_network
     show_network_status
     
-    if [[ "${DRY_RUN:-false}" == "true" ]]; then
-        log "INFO" "DRY RUN completed - no changes were made"
-    else
-        log "INFO" "Network configuration completed successfully!"
-        log "INFO" "Backup available at: $INTERFACES_BACKUP"
-        log "INFO" "Emergency restore script: /root/restore-network.sh"
-    fi
+    log "INFO" "Network configuration completed successfully!"
+    log "INFO" "Backup available at: $INTERFACES_BACKUP"
+    log "INFO" "Emergency restore script: /root/restore-network.sh"
 }
 
 # Script entry point

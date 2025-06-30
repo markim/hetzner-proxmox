@@ -241,11 +241,6 @@ main() {
     if [[ "$config_ok" == "true" ]]; then
         echo "${GREEN}Ready to proceed with Proxmox setup!${NC}"
         echo
-        echo "Next steps:"
-        echo "1. Run: ./install.sh --network --dry-run"
-        echo "2. Run: ./install.sh --network"
-        echo "3. Run: ./install.sh --pfsense"
-        echo "4. Run: ./install.sh --firewalladmin"
     else
         echo "${RED}Please fix MAC address configuration before proceeding${NC}"
         echo

@@ -24,15 +24,12 @@ Automated setup scripts for configuring a Hetzner server with Proxmox, pfSense f
    sudo ./install.sh --check-mac
    
    # Optional: Scan drives and configure RAID arrays (interactive)
-   sudo ./install.sh --preparedrives --dry-run  # Preview first
-   sudo ./install.sh --preparedrives
+   sudo ./install.sh --drives
    
    # Install reverse proxy with HTTPS
-   sudo ./install.sh --caddy --dry-run          # Preview first
    sudo ./install.sh --caddy
    
-   # Configure network bridges for pfSense
-   sudo ./install.sh --network --dry-run        # Preview first
+   # Configure network bridges for server and pfsense
    sudo ./install.sh --network
    
    # Create pfSense firewall VM
@@ -53,18 +50,11 @@ Automated setup scripts for configuring a Hetzner server with Proxmox, pfSense f
 | Command | Description |
 |---------|-------------|
 | `./install.sh --check-mac` | **START HERE** - Verify MAC address configuration |
-| `./install.sh --preparedrives` | Interactive drive and RAID configuration (optional) |
+| `./install.sh --drives` | Interactive drive and RAID configuration (optional) |
 | `./install.sh --caddy` | Install Caddy reverse proxy with HTTPS |
 | `./install.sh --network` | Configure network bridges for additional IPs |
 | `./install.sh --pfsense` | Create pfSense firewall VM |
 | `./install.sh --firewalladmin` | Create Fedora container for pfSense admin access |
-
-### Command Options
-- `--dry-run` - Preview changes without executing (recommended first)
-- `--verbose` - Enable detailed logging
-- `--config FILE` - Use custom environment file
-- `--config auto` - Use recommended RAID configuration automatically
-- `--force` - Skip safety confirmations (use with extreme caution)
 
 ## 🏗️ What This Creates
 
@@ -101,7 +91,7 @@ Internet → Additional IPs → vmbr0 (WAN) → pfSense → vmbr1 (LAN) / vmbr2 
 - Professional-grade firewall and routing capabilities
 
 **Firewall Admin Container**
-- Fedora container with desktop environment and Firefox
+- Puppy linux container with desktop environment and Firefox
 - Secure access to pfSense web interface
 - Network troubleshooting tools included
 
@@ -120,7 +110,7 @@ Internet → Additional IPs → vmbr0 (WAN) → pfSense → vmbr1 (LAN) / vmbr2 
 # Domain and SSL
 DOMAIN=proxmox.example.com
 EMAIL=your-email@example.com
-
+PUBLIC_IP=mainproxmoxserverIP
 # Additional IP Configuration (Method 1: Environment Variables)
 ADDITIONAL_IP_1=203.0.113.10
 ADDITIONAL_MAC_1=00:50:56:00:01:02
@@ -133,6 +123,7 @@ ADDITIONAL_MAC_2=00:50:56:00:01:03
 ```
 
 ### Alternative: Config File (Method 2)
+This is an alternative method for the additional IP's. The .env file still needs the other values if you want to use caddy, etc.
 
 Create `config/additional-ips.conf`:
 ```
@@ -141,24 +132,6 @@ IP=203.0.113.11 MAC=00:50:56:00:01:03 GATEWAY=203.0.113.1 NETMASK=255.255.255.19
 ```
 
 **⚠️ Critical**: MAC addresses are mandatory! Get them from your Hetzner control panel.
-
-## 🛠️ Manual Installation
-
-If you prefer to run individual components:
-
-```bash
-# Install Caddy
-./scripts/setup-caddy.sh
-
-# Configure network
-./scripts/configure-network.sh
-
-# Setup pfSense VM
-./scripts/setup-pfsense.sh
-
-# Setup firewall admin container
-./scripts/setup-firewall-admin.sh
-```
 
 ## 🔒 Security Features
 
@@ -183,7 +156,6 @@ If you prefer to run individual components:
 2. **Review troubleshooting**: [docs/troubleshooting.md](docs/troubleshooting.md)
 3. **Verify MAC addresses**: Run `./install.sh --check-mac`
 4. **Check logs**: `journalctl -u caddy -f`
-5. **Test in dry-run mode**: Add `--dry-run` to any command
 
 ---
 

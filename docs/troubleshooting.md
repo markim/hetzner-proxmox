@@ -230,11 +230,9 @@ dmesg | tail
 ### Reset Component
 ```bash
 # Reset Caddy configuration
-sudo ./install.sh --caddy --dry-run  # Preview
 sudo ./install.sh --caddy            # Reapply
 
 # Reset network configuration
-sudo ./install.sh --network --dry-run  # Preview
 sudo ./install.sh --network            # Reapply
 ```
 
@@ -284,10 +282,6 @@ nethogs
    tail -f /var/log/syslog
    ```
 
-3. **Test in dry-run mode:**
-   ```bash
-   sudo ./install.sh --network --dry-run
-   ```
 
 ### Information to Include
 

@@ -160,10 +160,6 @@ create_firewall_admin_vm() {
 parse_arguments() {
     while [[ $# -gt 0 ]]; do
         case $1 in
-            --dry-run)
-                export DRY_RUN="true"
-                shift
-                ;;
             --help|-h)
                 show_help
                 exit 0
@@ -193,7 +189,6 @@ Usage: $0 [OPTIONS]
 Create firewall admin VM for pfSense management through Proxmox VNC console.
 
 OPTIONS:
-    --dry-run           Show what would be done without making changes
     --help, -h          Show this help message
 
 DESCRIPTION:
@@ -209,7 +204,6 @@ DESCRIPTION:
     3. Access pfSense admin panel from within the VM
 
 EXAMPLES:
-    $0 --dry-run        # Preview what will be created
     $0                  # Create the firewall admin VM
 
 NOTES:
@@ -224,30 +218,6 @@ EOF
 main() {
     log "INFO" "Starting firewall admin VM setup for Hetzner Proxmox..."
     
-    if [[ "${DRY_RUN:-false}" == "true" ]]; then
-        log "INFO" "=== DRY RUN MODE - SHOWING PLANNED ACTIONS ==="
-        log "INFO" ""
-        log "INFO" "Firewall Admin VM Configuration:"
-        log "INFO" "  - VM ID: $FIREWALL_ADMIN_VM_ID"
-        log "INFO" "  - Hostname: $FIREWALL_ADMIN_HOSTNAME"
-        log "INFO" "  - Memory: ${FIREWALL_ADMIN_MEMORY}MB"
-        log "INFO" "  - CPU Cores: $FIREWALL_ADMIN_CORES"
-        log "INFO" "  - Disk Size: $FIREWALL_ADMIN_DISK_SIZE GB"
-        log "INFO" "  - LAN Interface: vmbr1 (for pfSense access)"
-        log "INFO" "  - WAN Interface: vmbr0 (for internet access)"
-        log "INFO" ""
-        log "INFO" "Actions that would be performed:"
-        log "INFO" "  1. Validate prerequisites (network bridges)"
-        log "INFO" "  2. Download Puppy Linux ISO if needed (~400MB)"
-        log "INFO" "  3. Create VM with ID $FIREWALL_ADMIN_VM_ID"
-        log "INFO" "  4. Configure LAN interface on vmbr1"
-        log "INFO" "  5. Configure WAN interface on vmbr0 with MAC address"
-        log "INFO" "  6. Mount Puppy Linux ISO for instant boot"
-        log "INFO" ""
-        log "INFO" "DRY RUN completed - no changes were made"
-        log "INFO" "To create the firewall admin VM, run without --dry-run flag"
-        return 0
-    fi
     
     # Validate prerequisites
     validate_prerequisites

@@ -298,10 +298,6 @@ parse_arguments() {
                 export FORCE_RECREATE=true
                 shift
                 ;;
-            --dry-run)
-                export DRY_RUN=true
-                shift
-                ;;
             --help|-h)
                 show_help
                 exit 0
@@ -333,7 +329,6 @@ OPTIONS:
     --cores N            CPU cores (default: $PFSENSE_CPU_CORES)
     --disk-size SIZE     Disk size (default: $PFSENSE_DISK_SIZE GB)
     --force              Recreate VM if it already exists
-    --dry-run            Show what would be done without creating VM
     --verbose, -v        Enable verbose output
     --help, -h           Show this help message
 
@@ -341,7 +336,6 @@ EXAMPLES:
     $0                                    # Use defaults
     $0 --vm-id 200 --memory 4096          # Custom VM ID and memory
     $0 --wan-ip 1.2.3.4                   # Specify WAN IP
-    $0 --dry-run                          # Preview without creating
 
 PREREQUISITES:
     - Network configuration must be completed first
@@ -358,30 +352,6 @@ main() {
     
     log "INFO" "Starting pfSense setup for Hetzner Proxmox..."
     
-    if [[ "${DRY_RUN:-false}" == "true" ]]; then
-        log "INFO" "=== DRY RUN MODE - SHOWING PLANNED ACTIONS ==="
-        log "INFO" ""
-        log "INFO" "pfSense VM Configuration:"
-        log "INFO" "  - VM ID: $PFSENSE_VM_ID"
-        log "INFO" "  - Memory: ${PFSENSE_MEMORY}MB"
-        log "INFO" "  - CPU Cores: $PFSENSE_CPU_CORES"
-        log "INFO" "  - Disk Size: $PFSENSE_DISK_SIZE GB"
-        log "INFO" "  - WAN IP: ${PFSENSE_WAN_IP:-'Auto-select from additional IPs'}"
-        log "INFO" "  - LAN IP: $PFSENSE_LAN_IP"
-        log "INFO" "  - DMZ IP: $PFSENSE_DMZ_IP"
-        log "INFO" ""
-        log "INFO" "Actions that would be performed:"
-        log "INFO" "  1. Validate prerequisites"
-        log "INFO" "  2. Download pfSense ISO if needed"
-        log "INFO" "  3. Create VM with ID $PFSENSE_VM_ID"
-        log "INFO" "  4. Configure network interfaces"
-        log "INFO" "  5. Generate setup documentation"
-        log "INFO" "  6. Create manual configuration guide"
-        log "INFO" ""
-        log "INFO" "DRY RUN completed - no changes were made"
-        log "INFO" "To create the pfSense VM, run without --dry-run flag"
-        return 0
-    fi
     
     # Load additional IPs array if available
     if [[ -f "$SCRIPT_DIR/scripts/configure-network.sh" ]]; then

@@ -98,8 +98,6 @@ If your server has multiple drives, optimize them:
 # Scan system and show drive recommendations
 sudo ./install.sh --preparedrives
 
-# Preview recommended configuration
-sudo ./install.sh --preparedrives --config <recommended> --dry-run
 
 # Apply optimal configuration
 sudo ./install.sh --preparedrives --config <recommended>
@@ -130,9 +128,6 @@ sudo ./install.sh --caddy
 ### Step 6: Configure Network
 
 ```bash
-# Preview network changes
-sudo ./install.sh --network --dry-run
-
 # Apply network configuration
 sudo ./install.sh --network
 ```
@@ -151,9 +146,6 @@ sudo ./install.sh --network
 ### Step 7: Create pfSense Firewall VM
 
 ```bash
-# Preview pfSense VM creation
-sudo ./install.sh --pfsense --dry-run
-
 # Create pfSense VM
 sudo ./install.sh --pfsense
 ```
@@ -174,9 +166,6 @@ sudo ./install.sh --pfsense
 ### Step 8: Create Firewall Admin Container
 
 ```bash
-# Preview admin container creation
-sudo ./install.sh --firewalladmin --dry-run
-
 # Create admin container
 sudo ./install.sh --firewalladmin
 ```
