@@ -49,7 +49,14 @@ optimize_system() {
         irqbalance \
         chrony \
         rsyslog \
-        logrotate
+        logrotate \
+        parted \
+        mdadm \
+        curl \
+        debian-keyring \
+        debian-archive-keyring \
+        apt-transport-https \
+        gnupg
     
     # Configure system swappiness for better VM performance
     log "INFO" "Configuring VM swappiness..."

@@ -245,13 +245,6 @@ format_drive() {
     
     log "INFO" "Formatting drive /dev/$drive with $filesystem filesystem..."
     
-    # Check if parted is installed
-    if ! command -v parted &> /dev/null; then
-        log "WARN" "parted not installed. Installing parted..."
-        apt-get update
-        apt-get install -y parted
-    fi
-    
     # Verify drive exists
     if [[ ! -b "/dev/$drive" ]]; then
         log "ERROR" "Drive /dev/$drive does not exist"

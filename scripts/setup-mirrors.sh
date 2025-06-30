@@ -158,12 +158,6 @@ group_drives_by_size() {
 check_current_raid() {
     log "INFO" "Checking current RAID configuration..."
     
-    if ! command -v mdadm &> /dev/null; then
-        log "WARN" "mdadm not installed. Installing mdadm..."
-        apt-get update
-        apt-get install -y mdadm
-    fi
-    
     # Check for existing RAID arrays
     local existing_arrays
     existing_arrays=$(grep "^md" /proc/mdstat || true)

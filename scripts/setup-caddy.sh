@@ -13,21 +13,6 @@ load_env
 
 # Install Caddy
 install_caddy() {
-    log "INFO" "Installing Caddy web server..."
-    
-    # Update package list (suppress warnings about duplicate sources)
-    log "INFO" "Updating package list..."
-    apt-get update -qq 2>/dev/null || apt-get update -qq
-    
-    # Install required packages
-    log "INFO" "Installing prerequisites..."
-    apt-get install -y -qq \
-        debian-keyring \
-        debian-archive-keyring \
-        apt-transport-https \
-        curl \
-        gnupg 2>/dev/null
-    
     # Add Caddy repository
     log "INFO" "Adding Caddy repository..."
     
@@ -90,10 +75,7 @@ main() {
     
     # Check if running as root
     check_root
-    
-    # Check dependencies
-    check_dependencies "curl" "apt-get" "systemctl"
-    
+
     if install_caddy; then
         log "INFO" "Caddy installation script completed successfully"
     else
