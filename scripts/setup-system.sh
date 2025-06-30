@@ -27,6 +27,9 @@ source "$PROJECT_ROOT/lib/common.sh"
 # Global variable for data backup directory
 DATA_BACKUP_DIR=""
 
+# Enable debug logging for troubleshooting
+export LOG_LEVEL="${LOG_LEVEL:-DEBUG}"
+
 # Function to optimize system for Proxmox
 optimize_system() {
     log "INFO" "Optimizing system for Proxmox performance..."
@@ -211,6 +214,8 @@ detect_system_drive() {
     local root_device
     root_device=$(findmnt -n -o SOURCE / 2>/dev/null || true)
     
+    log "DEBUG" "Root device from findmnt: $root_device"
+    
     if [[ -z "$root_device" ]]; then
         log "ERROR" "Could not detect root filesystem device"
         return 1
@@ -218,6 +223,7 @@ detect_system_drive() {
     
     # Handle LVM devices - trace back to physical volumes
     if [[ "$root_device" =~ ^/dev/mapper/ || "$root_device" =~ ^/dev/.*-.*$ ]]; then
+        log "DEBUG" "Detected LVM root device: $root_device"
         # This is an LVM device, find the underlying physical volumes
         local vg_name
         if [[ "$root_device" =~ /dev/mapper/(.*)-root ]]; then
@@ -226,14 +232,18 @@ detect_system_drive() {
             vg_name="${BASH_REMATCH[1]}"
         fi
         
+        log "DEBUG" "Extracted VG name: $vg_name"
+        
         if [[ -n "$vg_name" ]] && command -v pvs >/dev/null 2>&1; then
             # Get the first physical volume for this volume group
             local pv_device
             pv_device=$(pvs --noheadings -o pv_name -S vg_name="$vg_name" 2>/dev/null | head -1 | tr -d ' ' || true)
+            log "DEBUG" "First PV device for VG $vg_name: $pv_device"
             if [[ -n "$pv_device" ]]; then
                 # Get the parent disk
                 local parent_disk
                 parent_disk=$(lsblk -no PKNAME "$pv_device" 2>/dev/null || true)
+                log "DEBUG" "Parent disk for PV $pv_device: $parent_disk"
                 if [[ -n "$parent_disk" ]]; then
                     echo "$parent_disk"
                     return 0
@@ -243,12 +253,14 @@ detect_system_drive() {
                     if [[ "$parent_disk" =~ [0-9]$ ]]; then
                         parent_disk="${parent_disk%[0-9]*}"
                     fi
+                    log "DEBUG" "Fallback parent disk: $parent_disk"
                     echo "$parent_disk"
                     return 0
                 fi
             fi
         fi
     else
+        log "DEBUG" "Detected regular root device: $root_device"
         # Regular device - get parent disk
         if [[ "$root_device" =~ [0-9]$ ]]; then
             root_device="${root_device%[0-9]*}"
@@ -313,8 +325,11 @@ get_system_drive_free_space() {
 get_lvm_free_space() {
     local drive="$1"
     
+    log "DEBUG" "Checking LVM free space for drive: $drive"
+    
     # Check if this drive/partition has LVM physical volumes
     if ! command -v pvs >/dev/null 2>&1; then
+        log "DEBUG" "LVM tools not available"
         echo "0"
         return 0
     fi
@@ -324,19 +339,25 @@ get_lvm_free_space() {
     
     # Check the drive itself
     if pvs "/dev/$drive" >/dev/null 2>&1; then
+        log "DEBUG" "Drive /dev/$drive is a PV"
         pv_devices+=("/dev/$drive")
     fi
     
     # Check all partitions of the drive
     while IFS= read -r partition; do
         if [[ -n "$partition" && -b "/dev/$partition" ]]; then
+            log "DEBUG" "Checking partition: /dev/$partition"
             if pvs "/dev/$partition" >/dev/null 2>&1; then
+                log "DEBUG" "Partition /dev/$partition is a PV"
                 pv_devices+=("/dev/$partition")
             fi
         fi
     done < <(lsblk -no NAME "/dev/$drive" 2>/dev/null | tail -n +2 | grep -E "^${drive}[0-9p]+" | sed 's/^[[:space:]]*//')
     
+    log "DEBUG" "Found PV devices: ${pv_devices[*]}"
+    
     if [[ ${#pv_devices[@]} -eq 0 ]]; then
+        log "DEBUG" "No LVM physical volumes found"
         echo "0"
         return 0
     fi
@@ -348,6 +369,8 @@ get_lvm_free_space() {
     for pv_device in "${pv_devices[@]}"; do
         local vg_name
         vg_name=$(pvs --noheadings -o vg_name "$pv_device" 2>/dev/null | tr -d ' ' || true)
+        
+        log "DEBUG" "PV $pv_device belongs to VG: $vg_name"
         
         if [[ -n "$vg_name" ]]; then
             # Check if we've already processed this VG (avoid double counting)
@@ -366,6 +389,8 @@ get_lvm_free_space() {
                 local vg_free_bytes
                 vg_free_bytes=$(vgs --noheadings -o vg_free --units B "$vg_name" 2>/dev/null | tr -d ' B' || echo "0")
                 
+                log "DEBUG" "VG $vg_name has free space: $vg_free_bytes bytes"
+                
                 if [[ "$vg_free_bytes" =~ ^[0-9]+$ ]]; then
                     total_free_bytes=$((total_free_bytes + vg_free_bytes))
                 fi
@@ -373,11 +398,14 @@ get_lvm_free_space() {
         fi
     done
     
+    log "DEBUG" "Total LVM free space: $total_free_bytes bytes"
+    
     # Only return if we have at least 10GB free
     local min_space_bytes=$((10 * 1024 * 1024 * 1024))
     if [[ $total_free_bytes -ge $min_space_bytes ]]; then
         echo "$total_free_bytes"
     else
+        log "DEBUG" "LVM free space below minimum threshold (10GB)"
         echo "0"
     fi
 }
@@ -726,10 +754,20 @@ setup_data_partition() {
     local free_space_bytes
     free_space_bytes=$(get_system_drive_free_space "$system_drive")
     
+    log "DEBUG" "Free space detected: $free_space_bytes bytes"
+    
     if [[ "$free_space_bytes" -eq 0 ]]; then
         log "WARNING" "No sufficient free space (minimum 10GB) on system drive for /data partition"
         log "INFO" "Current drive layout:"
         lsblk "/dev/$system_drive" 2>/dev/null || true
+        
+        # Let's check LVM info directly for debugging
+        if command -v vgs >/dev/null 2>&1; then
+            log "DEBUG" "LVM Volume Groups:"
+            vgs 2>/dev/null || true
+            log "DEBUG" "LVM Physical Volumes:"
+            pvs 2>/dev/null || true
+        fi
         
         # Create /data directory anyway for manual mounting
         log "INFO" "Creating /data directory for manual use..."
@@ -743,7 +781,7 @@ setup_data_partition() {
         mkdir -p /data/templates
         mkdir -p /data/logs
         
-        log "INFO" "/data directory created, but no partition was created due to insufficient space"
+        log "INFO" "/data directory created, but no storage was created due to insufficient space"
         return 0
     fi
     
