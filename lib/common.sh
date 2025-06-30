@@ -31,9 +31,16 @@ load_env() {
     fi
     
     # Set defaults for required variables
-    export LOG_FILE="${LOG_FILE:-$DEFAULT_LOG_FILE}"
+    # Use a local log file if not running as root or if /var/log is not writable
+    local default_log_file="$DEFAULT_LOG_FILE"
+    if [[ $EUID -ne 0 ]] || [[ ! -w /var/log ]]; then
+        default_log_file="./hetzner-proxmox-setup.log"
+    fi
+    
+    export LOG_FILE="${LOG_FILE:-$default_log_file}"
     export LOG_LEVEL="${LOG_LEVEL:-$DEFAULT_LOG_LEVEL}"
     export CADDY_CONFIG_DIR="${CADDY_CONFIG_DIR:-/etc/caddy}"
+    export CADDY_LOG_FILE="${CADDY_LOG_FILE:-/var/log/caddy/caddy.log}"
     export PROXMOX_PORT="${PROXMOX_PORT:-8006}"
     export INTERNAL_IP="${INTERNAL_IP:-127.0.0.1}"
 }
@@ -57,8 +64,9 @@ log() {
     
     # Log to file
     if [[ -n "${LOG_FILE:-}" ]]; then
-        mkdir -p "$(dirname "$LOG_FILE")"
-        echo "[$timestamp] [$script_name] [$level] $message" >> "$LOG_FILE"
+        if mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null; then
+            echo "[$timestamp] [$script_name] [$level] $message" >> "$LOG_FILE" 2>/dev/null || true
+        fi
     fi
 }
 
