@@ -481,14 +481,15 @@ show_drive_details() {
     done
 }
 
-# Function to setup system drive mirror (complex operation)
+# Function to setup system drive mirror using mdadm RAID1
+# Function to setup system drive mirror using mdadm RAID1 (fully automated)
 setup_system_drive_mirror() {
     local drive1="$1"
     local drive2="$2"
     local md_device="$3"
     local mirror_index="$4"
     
-    log "INFO" "Setting up system drive mirror: $drive1 + $drive2 -> $md_device"
+    log "INFO" "Setting up automated system drive mirror: $drive1 + $drive2 -> $md_device"
     
     # Determine which drive is the system drive and which is the target
     local system_drive=""
@@ -505,37 +506,220 @@ setup_system_drive_mirror() {
     log "INFO" "System drive: $system_drive"
     log "INFO" "Target drive: $target_drive"
     
-    # For system drive mirroring, we need to:
-    # 1. Clean the target drive
-    # 2. Create a degraded RAID array with just the target drive
-    # 3. Copy the system to the RAID array
-    # 4. Add the original system drive to the RAID array
-    # This is complex and requires careful handling
+    # Get the main system partition (typically the first partition)
+    local system_partition=""
+    local system_partitions
+    system_partitions=$(lsblk "$system_drive" -no NAME,TYPE | grep "part" | awk '{print "/dev/"$1}')
     
-    log "WARN" "System drive mirroring is a complex operation that should be done manually."
-    log "WARN" "For safety, we'll set up the target drive as a single drive instead."
-    log "WARN" "You can manually convert to RAID later using mdadm."
+    # Find the root partition
+    for part in $system_partitions; do
+        if lsblk "$part" -no MOUNTPOINT | grep -q "^/$"; then
+            system_partition="$part"
+            break
+        fi
+    done
     
-    # Clean the target drive
-    if lsblk "$target_drive" -no FSTYPE 2>/dev/null | grep -q "."; then
-        log "INFO" "Cleaning target drive $target_drive..."
-        wipefs -a "$target_drive"
+    # If no root partition found, use the first partition
+    if [[ -z "$system_partition" ]]; then
+        system_partition=$(echo "$system_partitions" | head -n1)
     fi
     
-    # Set up target drive as single storage for now
-    log "INFO" "Creating ext4 filesystem on target drive $target_drive..."
-    mkfs.ext4 -F "$target_drive"
+    if [[ -z "$system_partition" ]]; then
+        log "ERROR" "Could not find system partition on $system_drive"
+        return 1
+    fi
     
-    # Add to Proxmox storage
-    add_to_proxmox_storage "$target_drive" "system-mirror-ready-$mirror_index"
+    log "INFO" "Found main system partition: $system_partition"
     
-    log "INFO" "Target drive $target_drive is ready for manual system mirroring"
-    log "INFO" "To complete system mirroring, you'll need to:"
-    log "INFO" "1. Create a degraded RAID1 array with the target drive"
-    log "INFO" "2. Copy your system partitions to the RAID array"
-    log "INFO" "3. Update bootloader and fstab"
-    log "INFO" "4. Add the original system drive to the RAID array"
-    log "INFO" "This process requires advanced knowledge and should be done carefully."
+    # Step 1: Clone partition table to target drive
+    log "INFO" "Cloning partition table from $system_drive to $target_drive..."
+    if ! sfdisk -d "$system_drive" | sfdisk "$target_drive"; then
+        log "ERROR" "Failed to clone partition table"
+        return 1
+    fi
+    
+    # Wait for partition table to be recognized
+    partprobe "$target_drive"
+    sleep 3
+    
+    # Get the corresponding target partition
+    local target_partition=""
+    local partition_num
+    # Extract partition number using parameter expansion
+    local temp="${system_partition##*[!0-9]}"
+    partition_num="${temp:-1}"
+    
+    # Try different naming schemes
+    for candidate in "${target_drive}${partition_num}" "${target_drive}p${partition_num}"; do
+        if [[ -b "$candidate" ]]; then
+            target_partition="$candidate"
+            break
+        fi
+    done
+    
+    if [[ -z "$target_partition" ]]; then
+        log "ERROR" "Could not find target partition on $target_drive"
+        return 1
+    fi
+    
+    log "INFO" "Target partition: $target_partition"
+    
+    # Step 2: Create degraded RAID1 array with target partition only
+    log "INFO" "Creating degraded RAID1 array $md_device with target partition..."
+    if ! mdadm --create "$md_device" --level=1 --raid-devices=2 missing "$target_partition" --force; then
+        log "ERROR" "Failed to create degraded RAID array"
+        return 1
+    fi
+    
+    # Wait for array to be ready
+    sleep 3
+    
+    # Step 3: Copy system data to RAID array
+    log "INFO" "Copying system data from $system_partition to $md_device..."
+    log "INFO" "This may take a long time depending on the size of your system partition..."
+    if ! dd if="$system_partition" of="$md_device" bs=64K status=progress; then
+        log "ERROR" "Failed to copy system data"
+        return 1
+    fi
+    
+    # Step 4: Add original system partition to RAID array
+    log "INFO" "Adding original system partition $system_partition to RAID array..."
+    if ! mdadm --add "$md_device" "$system_partition"; then
+        log "ERROR" "Failed to add system partition to RAID array"
+        return 1
+    fi
+    
+    # Step 5: Update fstab for RAID
+    log "INFO" "Updating fstab for RAID boot..."
+    update_fstab_for_raid "$system_partition" "$md_device"
+    
+    # Step 6: Update GRUB for RAID boot
+    log "INFO" "Updating GRUB for RAID boot..."
+    update_grub_for_raid "$md_device"
+    
+    # Step 7: Install GRUB on both drives
+    log "INFO" "Installing GRUB on both drives..."
+    grub-install "$system_drive" || log "WARN" "Failed to install GRUB on $system_drive"
+    grub-install "$target_drive" || log "WARN" "Failed to install GRUB on $target_drive"
+    update-grub || log "WARN" "Failed to update GRUB configuration"
+    
+    log "INFO" "System drive mirroring completed successfully!"
+    log "INFO" "RAID array $md_device is now syncing. This may take some time."
+    log "WARN" "You should reboot the system to test RAID boot functionality."
+    log "INFO" "After reboot, you can check RAID status with: cat /proc/mdstat"
+}
+
+# Function to update fstab for RAID boot
+update_fstab_for_raid() {
+    local old_partition="$1"
+    local raid_device="$2"
+    
+    log "INFO" "Updating /etc/fstab to use RAID device..."
+    
+    # Backup fstab
+    local backup_file
+    backup_file="/etc/fstab.backup.$(date +%Y%m%d_%H%M%S)"
+    cp /etc/fstab "$backup_file"
+    log "INFO" "Backed up fstab to $backup_file"
+    
+    # Get UUID of RAID device
+    local raid_uuid
+    raid_uuid=$(blkid -s UUID -o value "$raid_device")
+    
+    if [[ -z "$raid_uuid" ]]; then
+        log "ERROR" "Could not get UUID for RAID device $raid_device"
+        return 1
+    fi
+    
+    log "INFO" "RAID device UUID: $raid_uuid"
+    
+    # Get UUID or device path of old partition
+    local old_uuid
+    old_uuid=$(blkid -s UUID -o value "$old_partition" 2>/dev/null || echo "")
+    
+    if [[ -n "$old_uuid" ]]; then
+        # Replace by UUID
+        log "INFO" "Replacing UUID=$old_uuid with UUID=$raid_uuid in fstab"
+        sed -i "s/UUID=$old_uuid/UUID=$raid_uuid/g" /etc/fstab
+    else
+        # Replace by device name
+        log "INFO" "Replacing $old_partition with $raid_device in fstab"
+        sed -i "s|$old_partition|$raid_device|g" /etc/fstab
+    fi
+    
+    log "INFO" "Updated fstab to use RAID device"
+}
+
+# Function to update GRUB for RAID boot
+update_grub_for_raid() {
+    local raid_device="$1"
+    
+    log "INFO" "Updating GRUB configuration for RAID boot..."
+    
+    # Ensure mdadm is in initramfs modules
+    log "INFO" "Adding RAID modules to initramfs..."
+    if [[ ! -f /etc/initramfs-tools/modules ]]; then
+        touch /etc/initramfs-tools/modules
+    fi
+    
+    if ! grep -q "raid1" /etc/initramfs-tools/modules; then
+        echo "raid1" >> /etc/initramfs-tools/modules
+    fi
+    
+    if ! grep -q "md_mod" /etc/initramfs-tools/modules; then
+        echo "md_mod" >> /etc/initramfs-tools/modules
+    fi
+    
+    # Update initramfs
+    log "INFO" "Updating initramfs..."
+    if ! update-initramfs -u -k all; then
+        log "WARN" "Failed to update initramfs, but continuing..."
+    fi
+    
+    # Configure GRUB for RAID
+    if [[ -f /etc/default/grub ]]; then
+        # Backup GRUB config
+        local grub_backup
+        grub_backup="/etc/default/grub.backup.$(date +%Y%m%d_%H%M%S)"
+        cp /etc/default/grub "$grub_backup"
+        log "INFO" "Backed up GRUB config to $grub_backup"
+        
+        # Ensure GRUB can handle RAID
+        if ! grep -q "GRUB_PRELOAD_MODULES.*raid" /etc/default/grub; then
+            if grep -q "^GRUB_PRELOAD_MODULES=" /etc/default/grub; then
+                sed -i 's/^GRUB_PRELOAD_MODULES=.*/GRUB_PRELOAD_MODULES="raid mdraid1x"/' /etc/default/grub
+            else
+                echo 'GRUB_PRELOAD_MODULES="raid mdraid1x"' >> /etc/default/grub
+            fi
+            log "INFO" "Added RAID modules to GRUB preload"
+        fi
+        
+        # Ensure GRUB can find RAID devices
+        if ! grep -q "GRUB_DEVICE_BOOT" /etc/default/grub; then
+            local raid_uuid
+            raid_uuid=$(blkid -s UUID -o value "$raid_device")
+            if [[ -n "$raid_uuid" ]]; then
+                echo "GRUB_DEVICE_BOOT=UUID=$raid_uuid" >> /etc/default/grub
+                log "INFO" "Set GRUB boot device to RAID UUID: $raid_uuid"
+            fi
+        fi
+    fi
+    
+    # Install GRUB on both drives of the RAID array
+    log "INFO" "Installing GRUB on RAID member drives..."
+    local drives
+    drives=$(mdadm --detail "$raid_device" 2>/dev/null | grep -E "/dev/" | grep -oE "/dev/[a-z]+" | sort -u)
+    
+    for drive in $drives; do
+        if [[ -b "$drive" ]]; then
+            log "INFO" "Installing GRUB on $drive..."
+            if ! grub-install "$drive"; then
+                log "WARN" "Failed to install GRUB on $drive"
+            fi
+        fi
+    done
+    
+    log "INFO" "GRUB configuration updated for RAID boot"
 }
 
 # Function to check if a drive is already in a RAID array
