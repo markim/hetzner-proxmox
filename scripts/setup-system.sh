@@ -252,121 +252,7 @@ apply_sysctl_safe() {
     fi
 }
 
-# Function to setup /var/lib/vz storage for Proxmox
-setup_data_storage() {
-    log "INFO" "Setting up /var/lib/vz storage for Proxmox..."
-    
-    local data_dir="/var/lib/vz"
-    local storage_name="data"
-    
-    # Create the data directory if it doesn't exist
-    if [[ ! -d "$data_dir" ]]; then
-        log "INFO" "Creating $data_dir directory..."
-        mkdir -p "$data_dir"
-        
-        # Set appropriate permissions
-        chown root:root "$data_dir"
-        chmod 755 "$data_dir"
-        log "INFO" "Created $data_dir with appropriate permissions"
-    else
-        log "INFO" "$data_dir directory already exists"
-    fi
-    
-    # Check if we have Proxmox VE tools available
-    if ! command -v pvesm >/dev/null 2>&1; then
-        log "WARNING" "Proxmox VE tools not found - storage will be created when Proxmox is installed"
-        log "INFO" "Directory $data_dir is ready for Proxmox storage configuration"
-        return 0
-    fi
-    
-    # Add to Proxmox storage configuration if not already present
-    if ! pvesm status -storage "$storage_name" &>/dev/null; then
-        log "INFO" "Adding $data_dir as Proxmox storage '$storage_name'..."
-        # Add comprehensive content types for the data storage
-        if pvesm add dir "$storage_name" --path "$data_dir" --content "images,vztmpl,iso,snippets,backup,rootdir"; then
-            log "INFO" "Successfully added storage '$storage_name' to Proxmox"
-            
-            # Enable the storage if it's not enabled
-            if pvesm set "$storage_name" --disable 0 2>/dev/null; then
-                log "INFO" "Storage '$storage_name' enabled"
-            fi
-        else
-            log "WARNING" "Failed to add storage '$storage_name' to Proxmox (this is normal if Proxmox is not yet installed)"
-        fi
-    else
-        log "INFO" "Storage '$storage_name' already exists in Proxmox"
-        
-        # Ensure existing storage has all content types and is enabled
-        log "INFO" "Updating storage '$storage_name' configuration..."
-        if pvesm set "$storage_name" --content "images,vztmpl,iso,snippets,backup,rootdir" --disable 0 2>/dev/null; then
-            log "INFO" "Storage '$storage_name' configuration updated"
-        fi
-    fi
-    
-    # Show storage information
-    log "INFO" "Data storage configuration:"
-    log "INFO" "  Path: $data_dir"
-    log "INFO" "  Storage name: $storage_name"
-    log "INFO" "  Content types: images, vztmpl, iso, snippets, backup, rootdir"
-    log "INFO" "  Available space: $(df -h "$data_dir" 2>/dev/null | tail -1 | awk '{print $4}' || echo 'Unknown')"
-}
 
-# Function to configure data storage in Proxmox (post-installation)
-configure_proxmox_data_storage() {
-    log "INFO" "Configuring /var/lib/vz storage in Proxmox..."
-    
-    local data_dir="/var/lib/vz"
-    local storage_name="data"
-    
-    # Check if Proxmox VE tools are available
-    if ! command -v pvesm >/dev/null 2>&1; then
-        log "ERROR" "Proxmox VE tools not found. Please install Proxmox VE first."
-        return 1
-    fi
-    
-    # Ensure data directory exists
-    if [[ ! -d "$data_dir" ]]; then
-        log "INFO" "Creating $data_dir directory..."
-        mkdir -p "$data_dir"
-        chown root:root "$data_dir"
-        chmod 755 "$data_dir"
-    fi
-    
-    # Add to Proxmox storage configuration if not already present
-    if ! pvesm status -storage "$storage_name" &>/dev/null; then
-        log "INFO" "Adding $data_dir as Proxmox storage '$storage_name'..."
-        # Add comprehensive content types for the data storage
-        if pvesm add dir "$storage_name" --path "$data_dir" --content "images,vztmpl,iso,snippets,backup,rootdir"; then
-            log "INFO" "Successfully added storage '$storage_name' to Proxmox"
-            
-            # Enable the storage if it's not enabled
-            if pvesm set "$storage_name" --disable 0 2>/dev/null; then
-                log "INFO" "Storage '$storage_name' enabled"
-            fi
-            
-            # Show current storage status
-            log "INFO" "Current Proxmox storage configuration:"
-            pvesm status
-        else
-            log "ERROR" "Failed to add storage '$storage_name' to Proxmox"
-            return 1
-        fi
-    else
-        log "INFO" "Storage '$storage_name' already exists in Proxmox"
-        
-        # Ensure existing storage has all content types and is enabled
-        log "INFO" "Updating storage '$storage_name' configuration..."
-        if pvesm set "$storage_name" --content "images,vztmpl,iso,snippets,backup,rootdir" --disable 0 2>/dev/null; then
-            log "INFO" "Storage '$storage_name' configuration updated"
-        fi
-        
-        # Show current storage status
-        log "INFO" "Current Proxmox storage configuration:"
-        pvesm status
-    fi
-    
-    return 0
-}
 
 # Main function
 main() {
@@ -381,7 +267,6 @@ Optimize the Proxmox host system for performance.
 
 OPTIONS:
     --help                Show this help message
-    --configure-storage   Configure /var/lib/vz storage in Proxmox (post-installation only)
 
 OPTIMIZATIONS PERFORMED:
     - System package updates
@@ -392,19 +277,14 @@ OPTIMIZATIONS PERFORMED:
     - Log rotation setup
     - Time synchronization
     - IRQ balancing
-    - /var/lib/vz directory setup
 
 EXAMPLES:
-    $0                        # Run system optimization and setup /var/lib/vz directory
-    $0 --configure-storage    # Add /var/lib/vz to Proxmox storage (after Proxmox installation)
+    $0                        # Run system optimization
 
 EOF
                 exit 0
                 ;;
-            --configure-storage)
-                configure_proxmox_data_storage
-                exit $?
-                ;;
+
             *)
                 log "ERROR" "Unknown option: $1"
                 exit 1
@@ -421,10 +301,6 @@ EOF
     log "INFO" "Starting Proxmox system optimization..."
     echo
     
-    # Setup data storage
-    setup_data_storage
-    echo
-    
     # Optimize system
     optimize_system
     echo
@@ -438,16 +314,13 @@ EOF
     log "INFO" "- Time synchronization with chrony"
     log "INFO" "- Log rotation configured"
     log "INFO" "- Tuned virtualization profile active"
-    log "INFO" "- /var/lib/vz configured as 'data' storage in Proxmox"
     echo
     
     log "INFO" "Next steps:"
-    log "INFO" "1. /var/lib/vz directory is ready for use as 'data' storage"
-    log "INFO" "2. Reboot to ensure all optimizations are active" 
-    log "INFO" "3. After Proxmox installation: run './scripts/setup-system.sh --configure-storage'"
-    log "INFO" "4. Format additional drives: ./install.sh --format-drives"
-    log "INFO" "5. Setup RAID mirrors: ./install.sh --setup-mirrors"
-    log "INFO" "6. Configure network: ./install.sh --network"
+    log "INFO" "1. Reboot to ensure all optimizations are active" 
+    log "INFO" "2. Format additional drives: ./install.sh --format-drives"
+    log "INFO" "3. Setup RAID mirrors: ./install.sh --setup-mirrors"
+    log "INFO" "4. Configure network: ./install.sh --network"
 }
 
 # Execute main function if script is run directly

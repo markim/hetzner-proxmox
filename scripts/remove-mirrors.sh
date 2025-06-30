@@ -787,6 +787,262 @@ cleanup_broken_system_mirror() {
     fi
 }
 
+# Function for interactive array selection and removal
+interactive_array_selection() {
+    log "INFO" "Interactive RAID array removal mode"
+    
+    local arrays
+    mapfile -t arrays < <(get_all_raid_arrays)
+    
+    if [[ ${#arrays[@]} -eq 0 ]]; then
+        log "INFO" "No RAID arrays found"
+        return 0
+    fi
+    
+    echo
+    log "INFO" "Available RAID arrays:"
+    
+    # Display arrays with information
+    for i in "${!arrays[@]}"; do
+        local array="${arrays[$i]}"
+        local members
+        mapfile -t members < <(get_raid_members "$array")
+        local is_system=""
+        
+        if is_system_array "$array"; then
+            is_system=" [SYSTEM]"
+        fi
+        
+        echo "$((i+1)). /dev/$array - Members: ${members[*]:-No members}$is_system"
+        
+        # Show mount points if any
+        local mount_points
+        mount_points=$(findmnt -n -o TARGET -S "/dev/$array" 2>/dev/null || true)
+        if [[ -n "$mount_points" ]]; then
+            echo "   Mounted at: $mount_points"
+        fi
+        
+        # Show detailed status
+        if command -v mdadm >/dev/null 2>&1 && [[ -b "/dev/$array" ]]; then
+            local status
+            status=$(mdadm --detail "/dev/$array" 2>/dev/null | grep -E "State|Active Devices|Working Devices" | head -3 | sed 's/^/   /' || echo "   Status: Unknown")
+            echo "$status"
+        fi
+        echo
+    done
+    
+    while true; do
+        echo "Select arrays to remove:"
+        echo "  📝 Enter array numbers separated by spaces (e.g., '1 3 4' for arrays 1, 3, and 4)"
+        echo "  📝 Enter 'all' to remove all arrays (including system arrays)"
+        echo "  📝 Enter 'data' to remove only data arrays (skip system arrays)"
+        echo "  📝 Enter 'quit' or 'exit' to cancel"
+        echo "  📝 Valid range: 1-${#arrays[@]}"
+        echo
+        read -p "Your selection: " -r selection
+        
+        if [[ "$selection" == "quit" ]] || [[ "$selection" == "exit" ]] || [[ "$selection" == "q" ]]; then
+            log "INFO" "Operation cancelled by user"
+            return 0
+        fi
+        
+        local arrays_to_remove=()
+        
+        if [[ "$selection" == "all" ]]; then
+            arrays_to_remove=("${arrays[@]}")
+        elif [[ "$selection" == "data" ]]; then
+            # Only include non-system arrays
+            for array in "${arrays[@]}"; do
+                if ! is_system_array "$array"; then
+                    arrays_to_remove+=("$array")
+                fi
+            done
+            
+            if [[ ${#arrays_to_remove[@]} -eq 0 ]]; then
+                log "INFO" "No data arrays found (all arrays appear to be system arrays)"
+                continue
+            fi
+        else
+            # Parse individual array numbers
+            local invalid_selections=()
+            local valid_count=0
+            
+            for num in $selection; do
+                if [[ "$num" =~ ^[0-9]+$ ]] && [[ $num -ge 1 ]] && [[ $num -le ${#arrays[@]} ]]; then
+                    # Check for duplicates
+                    local duplicate=false
+                    for existing_array in "${arrays_to_remove[@]}"; do
+                        if [[ "$existing_array" == "${arrays[$((num-1))]}" ]]; then
+                            duplicate=true
+                            break
+                        fi
+                    done
+                    
+                    if [[ "$duplicate" == "false" ]]; then
+                        arrays_to_remove+=("${arrays[$((num-1))]}")
+                        ((valid_count++))
+                    else
+                        log "WARNING" "Array $num already selected (ignoring duplicate)"
+                    fi
+                else
+                    invalid_selections+=("$num")
+                fi
+            done
+            
+            # Report any invalid selections but continue if we have valid ones
+            if [[ ${#invalid_selections[@]} -gt 0 ]]; then
+                log "WARNING" "Invalid selections: ${invalid_selections[*]} (valid range: 1-${#arrays[@]})"
+            fi
+            
+            # If we have some valid selections, continue; otherwise, go back to selection
+            if [[ $valid_count -eq 0 ]]; then
+                log "ERROR" "No valid arrays selected"
+                continue
+            elif [[ ${#invalid_selections[@]} -gt 0 ]]; then
+                log "INFO" "Proceeding with $valid_count valid array selection(s)"
+            fi
+        fi
+        
+        # Show selected arrays and categorize them
+        echo
+        log "INFO" "Selected arrays for removal:"
+        local system_arrays_selected=()
+        local data_arrays_selected=()
+        
+        for array in "${arrays_to_remove[@]}"; do
+            local members
+            mapfile -t members < <(get_raid_members "$array")
+            
+            if is_system_array "$array"; then
+                system_arrays_selected+=("$array")
+                log "WARNING" "  ⚠️  /dev/$array - Members: ${members[*]:-No members} [SYSTEM]"
+            else
+                data_arrays_selected+=("$array")
+                log "INFO" "  📀 /dev/$array - Members: ${members[*]:-No members} [DATA]"
+            fi
+        done
+        
+        # Warn about system arrays
+        if [[ ${#system_arrays_selected[@]} -gt 0 ]]; then
+            echo
+            log "WARNING" "⚠️  WARNING: You have selected ${#system_arrays_selected[@]} SYSTEM array(s)!"
+            log "WARNING" "⚠️  Removing system arrays may make your system unbootable!"
+            log "WARNING" "⚠️  System arrays: ${system_arrays_selected[*]}"
+        fi
+        
+        echo
+        log "WARNING" "⚠️  This will remove ${#arrays_to_remove[@]} RAID array(s)"
+        if [[ ${#system_arrays_selected[@]} -gt 0 ]]; then
+            log "WARNING" "⚠️  Including ${#system_arrays_selected[@]} SYSTEM array(s) that may affect boot!"
+        fi
+        echo
+        read -p "⚠️  Continue with removing these ${#arrays_to_remove[@]} array(s)? (y/N): " -r confirm
+        if [[ ! $confirm =~ ^[Yy]$ ]]; then
+            log "INFO" "Operation cancelled"
+            continue
+        fi
+        
+        # Additional confirmation for system arrays
+        if [[ ${#system_arrays_selected[@]} -gt 0 ]]; then
+            echo
+            read -p "⚠️  You selected SYSTEM arrays. Type 'REMOVE SYSTEM' to confirm: " -r system_confirm
+            if [[ "$system_confirm" != "REMOVE SYSTEM" ]]; then
+                log "INFO" "System array removal cancelled (you must type exactly 'REMOVE SYSTEM')"
+                continue
+            fi
+        fi
+        
+        # Remove selected arrays
+        remove_selected_arrays "${arrays_to_remove[@]}"
+        break
+    done
+}
+
+# Function to remove selected arrays
+remove_selected_arrays() {
+    local arrays_to_remove=("$@")
+    
+    log "INFO" "🚀 Starting removal of ${#arrays_to_remove[@]} selected array(s)..."
+    
+    local success_count=0
+    local failed_arrays=()
+    local array_counter=1
+    
+    for array in "${arrays_to_remove[@]}"; do
+        echo
+        log "INFO" "📀 [$array_counter/${#arrays_to_remove[@]}] Removing RAID array: /dev/$array"
+        
+        if remove_raid_array "$array" "false"; then
+            ((success_count++))
+            log "INFO" "✅ [$array_counter/${#arrays_to_remove[@]}] Successfully removed /dev/$array"
+        else
+            failed_arrays+=("$array")
+            log "ERROR" "❌ [$array_counter/${#arrays_to_remove[@]}] Failed to remove /dev/$array"
+        fi
+        
+        ((array_counter++))
+    done
+    
+    echo
+    log "INFO" "Removal completed!"
+    log "INFO" "Successfully removed: $success_count of ${#arrays_to_remove[@]} arrays"
+    
+    if [[ ${#failed_arrays[@]} -gt 0 ]]; then
+        log "WARNING" "Failed to remove the following arrays:"
+        for failed_array in "${failed_arrays[@]}"; do
+            log "WARNING" "  - /dev/$failed_array"
+        done
+        echo
+        log "INFO" "Common reasons for removal failures:"
+        log "INFO" "  - Array is still mounted and cannot be unmounted"
+        log "INFO" "  - Array is part of active LVM or other storage system"
+        log "INFO" "  - Hardware or driver issues"
+        log "INFO" "  - Insufficient permissions"
+        log "INFO" "Try using --force flag or manually investigate the failed arrays"
+    fi
+    
+    if [[ $success_count -gt 0 ]]; then
+        log "INFO" "Updating mdadm configuration..."
+        # Update mdadm.conf to remove the deleted arrays
+        if [[ -f /etc/mdadm/mdadm.conf ]]; then
+            # Create backup
+            cp /etc/mdadm/mdadm.conf "/etc/mdadm/mdadm.conf.backup.$(date +%Y%m%d_%H%M%S)"
+            
+            # Regenerate configuration with remaining arrays
+            echo "# Updated after removing arrays on $(date)" > /etc/mdadm/mdadm.conf
+            mdadm --detail --scan >> /etc/mdadm/mdadm.conf 2>/dev/null || log "WARNING" "No arrays left for mdadm.conf"
+        fi
+        
+        log "INFO" "Updating initramfs..."
+        update-initramfs -u 2>/dev/null || log "WARNING" "Failed to update initramfs"
+        
+        # Check if any system arrays were removed
+        local system_removed=false
+        for removed_array in "${arrays_to_remove[@]}"; do
+            local was_successful=true
+            for failed_array in "${failed_arrays[@]}"; do
+                if [[ "$removed_array" == "$failed_array" ]]; then
+                    was_successful=false
+                    break
+                fi
+            done
+            
+            if $was_successful && is_system_array "$removed_array"; then
+                system_removed=true
+                break
+            fi
+        done
+        
+        if $system_removed; then
+            log "WARNING" "⚠️  System RAID arrays were removed - reboot may be required!"
+        fi
+    fi
+    
+    echo
+    log "INFO" "📊 Final RAID status:"
+    show_raid_status
+}
+
 # Main function
 main() {
     local force=false
@@ -801,6 +1057,11 @@ main() {
                 ;;
             --status)
                 show_status=true
+                shift
+                ;;
+            --interactive|-i)
+                # Interactive is now default behavior when not using --force
+                # This option is kept for clarity but doesn't change behavior
                 shift
                 ;;
             --cleanup-broken)
@@ -824,27 +1085,34 @@ main() {
                 cat << EOF
 Usage: $0 [OPTIONS] [ARGS]
 
-Remove ALL RAID mirror configurations (including system mirrors), preserving data on individual drives.
+Remove RAID mirror configurations, preserving data on individual drives.
 Also provides advanced system mirroring functions for experienced users.
 
 OPTIONS:
-    --force                           Skip confirmation prompts and force unmount if needed
-    --status                         Show current RAID status and exit
-    --cleanup-broken                 Clean up broken/degraded system RAID arrays
-    --fix-raid                       Attempt to fix broken RAID arrays interactively
+    --interactive, -i             Select specific arrays to remove (default mode)
+    --force                       Skip confirmation prompts and force unmount if needed
+    --status                      Show current RAID status and exit
+    --cleanup-broken              Clean up broken/degraded system RAID arrays
+    --fix-raid                    Attempt to fix broken RAID arrays interactively
     --setup-system-mirror <sys> <tgt> Set up proper system mirroring (ADVANCED)
-    --help                           Show this help message
+    --help                        Show this help message
 
 EXAMPLES:
+    $0                                       # Interactive mode - select arrays to remove
+    $0 --interactive                         # Same as above (explicit)
     $0 --status                              # Show current RAID arrays
-    $0                                       # Remove ALL RAID mirrors including system (with confirmation)
-    $0 --force                              # Remove ALL RAID mirrors including system (no confirmation)
-    $0 --cleanup-broken                     # Clean up broken system RAID arrays (like degraded md1)
-    $0 --fix-raid                           # Interactively fix broken RAID arrays
+    $0 --force                               # Remove ALL RAID mirrors including system (no confirmation)
+    $0 --cleanup-broken                      # Clean up broken system RAID arrays (like degraded md1)
+    $0 --fix-raid                            # Interactively fix broken RAID arrays
     $0 --setup-system-mirror /dev/nvme0n1 /dev/nvme1n1  # Set up proper system mirroring
 
+MODES:
+    Interactive (default): Select specific RAID arrays to remove
+    Force: Remove ALL RAID arrays including system arrays (dangerous)
+
 SAFETY:
-    - Regular options remove ALL RAID arrays including system/root arrays
+    - Interactive mode allows selective removal of arrays
+    - Force mode removes ALL RAID arrays including system/root arrays
     - Original data remains accessible on individual drives
     - System may need to be rebooted to boot from individual drives
     - Prompts for confirmation unless --force is used
@@ -887,8 +1155,15 @@ EOF
     show_raid_status
     echo
     
-    # Remove ALL arrays (including system arrays)
-    remove_all_mirrors "$force"
+    # Determine mode based on force flag
+    if [[ "$force" == "true" ]]; then
+        # Force mode: Remove ALL arrays (including system arrays) without interaction
+        log "WARNING" "Force mode: Removing ALL arrays including system arrays"
+        remove_all_mirrors "$force"
+    else
+        # Interactive mode: Let user select arrays to remove
+        interactive_array_selection
+    fi
     
     echo
     log "INFO" "✅ RAID mirror removal completed (ALL mirrors including system)"

@@ -187,9 +187,7 @@ create_raid_mirrors() {
     log "INFO" "Creating RAID mirrors..."
     
     # Check if any mirrors will affect the /var/lib/vz data storage
-    local data_storage_affected=false
     if check_if_mirrors_affect_data_storage; then
-        data_storage_affected=true
         log "INFO" "Mirror configuration will affect /var/lib/vz storage"
         # Remove existing data storage configuration before creating mirrors
         remove_data_storage_from_proxmox
@@ -405,11 +403,6 @@ create_raid_mirrors() {
         fi
     done
     
-    # Re-add data storage configuration if it was affected by mirroring
-    if $data_storage_affected; then
-        log "INFO" "Re-adding /var/lib/vz storage configuration after mirroring..."
-        readd_data_storage_to_proxmox
-    fi
 }
 
 # Function to add storage to Proxmox
@@ -504,61 +497,6 @@ remove_data_storage_from_proxmox() {
     fi
 }
 
-# Function to re-add data storage to Proxmox after mirroring
-readd_data_storage_to_proxmox() {
-    local data_dir="/var/lib/vz"
-    local storage_name="data"
-    
-    log "INFO" "Re-adding '$storage_name' storage to Proxmox configuration..."
-    
-    # Check if Proxmox VE tools are available
-    if ! command -v pvesm >/dev/null 2>&1; then
-        log "DEBUG" "Proxmox VE tools not found - will configure when Proxmox is installed"
-        return 0
-    fi
-    
-    # Ensure the data directory exists
-    if [[ ! -d "$data_dir" ]]; then
-        log "INFO" "Creating $data_dir directory..."
-        mkdir -p "$data_dir"
-        chown root:root "$data_dir"
-        chmod 755 "$data_dir"
-    fi
-    
-    # Add to Proxmox storage configuration if not already present
-    if ! pvesm status -storage "$storage_name" &>/dev/null; then
-        log "INFO" "Adding $data_dir as Proxmox storage '$storage_name'..."
-        # Add comprehensive content types for the data storage
-        if pvesm add dir "$storage_name" --path "$data_dir" --content "images,vztmpl,iso,snippets,backup,rootdir"; then
-            log "INFO" "Successfully added storage '$storage_name' to Proxmox"
-            
-            # Enable the storage if it's not enabled
-            if pvesm set "$storage_name" --disable 0 2>/dev/null; then
-                log "DEBUG" "Storage '$storage_name' enabled"
-            fi
-        else
-            log "ERROR" "Failed to add storage '$storage_name' to Proxmox"
-            return 1
-        fi
-    else
-        log "INFO" "Storage '$storage_name' already exists in Proxmox"
-        
-        # Ensure existing storage has all content types and is enabled
-        log "DEBUG" "Updating storage '$storage_name' configuration..."
-        if pvesm set "$storage_name" --content "images,vztmpl,iso,snippets,backup,rootdir" --disable 0 2>/dev/null; then
-            log "DEBUG" "Storage '$storage_name' configuration updated"
-        fi
-    fi
-    
-    # Show storage information
-    log "INFO" "Data storage configuration:"
-    log "INFO" "  Path: $data_dir"
-    log "INFO" "  Storage name: $storage_name"
-    log "INFO" "  Content types: images, vztmpl, iso, snippets, backup, rootdir"
-    log "INFO" "  Available space: $(df -h "$data_dir" 2>/dev/null | tail -1 | awk '{print $4}' || echo 'Unknown')"
-    
-    return 0
-}
 
 # Function to check if mirrors will affect the /var/lib/vz directory
 check_if_mirrors_affect_data_storage() {
@@ -978,11 +916,7 @@ setup_lvm_system_mirror() {
         fi
     done
     
-    # Step 4: Re-add the main /var/lib/vz data storage after system mirroring
-    log "INFO" "Re-configuring /var/lib/vz data storage after system mirroring..."
-    readd_data_storage_to_proxmox
-    
-    # Step 5: Update system configuration for RAID boot
+    # Step 4: Update system configuration for RAID boot
     if [[ -n "$boot_md_device" ]]; then
         log "INFO" "Updating system configuration for RAID boot..."
         update_system_for_raid_boot "$boot_md_device" "$lvm_md_device" "$system_drive" "$target_drive"

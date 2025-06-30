@@ -438,6 +438,23 @@ EOF
         exit 1
     fi
     
+    # Check for required tools
+    local missing_tools=()
+    local required_tools=("lsblk" "findmnt" "wipefs" "mkfs.ext4" "blkid")
+    
+    for tool in "${required_tools[@]}"; do
+        if ! command -v "$tool" >/dev/null 2>&1; then
+            missing_tools+=("$tool")
+        fi
+    done
+    
+    if [[ ${#missing_tools[@]} -gt 0 ]]; then
+        log "ERROR" "Missing required tools: ${missing_tools[*]}"
+        log "ERROR" "Please install the missing packages:"
+        log "ERROR" "  apt update && apt install -y util-linux e2fsprogs"
+        exit 1
+    fi
+    
     log "INFO" "Starting drive formatting process..."
     log "INFO" "This script will help you safely format non-system drives"
     echo
@@ -481,7 +498,24 @@ EOF
     done
     
     if [[ ${#available_drives[@]} -eq 0 ]]; then
-        log "INFO" "No non-system drives available for formatting"
+        echo
+        log "INFO" "ℹ️  No non-system drives available for formatting"
+        log "INFO" ""
+        log "INFO" "All detected drives are currently:"
+        log "INFO" "  • System drives (used for OS/boot)"
+        log "INFO" "  • Already mounted with active data"
+        log "INFO" "  • Part of RAID arrays"
+        log "INFO" ""
+        log "INFO" "If you need to format system drives or RAID members:"
+        log "INFO" "  • Remove RAID arrays first: ./install.sh --remove-mirrors"
+        log "INFO" "  • Use manual tools with extreme caution"
+        log "INFO" ""
+        log "INFO" "Current system drives:"
+        for drive in "${system_drives[@]}"; do
+            local drive_info
+            drive_info=$(get_drive_info "$drive")
+            log "INFO" "  • /dev/$drive - $drive_info"
+        done
         exit 0
     fi
     
@@ -502,13 +536,14 @@ EOF
     # Drive selection loop
     while true; do
         echo "Select drives to format:"
-        echo "  Enter drive numbers separated by spaces (e.g., 1 3 4)"
-        echo "  Enter 'all' to format all available drives"
-        echo "  Enter 'quit' to exit without formatting"
+        echo "  📝 Enter drive numbers separated by spaces (e.g., '1 3 4' for drives 1, 3, and 4)"
+        echo "  📝 Enter 'all' to format all available drives"
+        echo "  📝 Enter 'quit' or 'exit' to cancel without formatting"
+        echo "  📝 Valid range: 1-${#available_drives[@]}"
         echo
-        read -p "Selection: " -r selection
+        read -p "Your selection: " -r selection
         
-        if [[ "$selection" == "quit" ]]; then
+        if [[ "$selection" == "quit" ]] || [[ "$selection" == "exit" ]] || [[ "$selection" == "q" ]]; then
             log "INFO" "Exiting without formatting any drives"
             exit 0
         fi
@@ -519,19 +554,43 @@ EOF
             drives_to_format=("${available_drives[@]}")
         else
             # Parse individual drive numbers
+            local invalid_selections=()
+            local valid_count=0
+            
             for num in $selection; do
                 if [[ "$num" =~ ^[0-9]+$ ]] && [[ $num -ge 1 ]] && [[ $num -le ${#available_drives[@]} ]]; then
-                    drives_to_format+=("${available_drives[$((num-1))]}")
+                    # Check for duplicates
+                    local duplicate=false
+                    for existing_drive in "${drives_to_format[@]}"; do
+                        if [[ "$existing_drive" == "${available_drives[$((num-1))]}" ]]; then
+                            duplicate=true
+                            break
+                        fi
+                    done
+                    
+                    if [[ "$duplicate" == "false" ]]; then
+                        drives_to_format+=("${available_drives[$((num-1))]}")
+                        ((valid_count++))
+                    else
+                        log "WARNING" "Drive $num already selected (ignoring duplicate)"
+                    fi
                 else
-                    log "ERROR" "Invalid selection: $num"
-                    continue 2
+                    invalid_selections+=("$num")
                 fi
             done
-        fi
-        
-        if [[ ${#drives_to_format[@]} -eq 0 ]]; then
-            log "ERROR" "No valid drives selected"
-            continue
+            
+            # Report any invalid selections but continue if we have valid ones
+            if [[ ${#invalid_selections[@]} -gt 0 ]]; then
+                log "WARNING" "Invalid selections: ${invalid_selections[*]} (valid range: 1-${#available_drives[@]})"
+            fi
+            
+            # If we have some valid selections, continue; otherwise, go back to selection
+            if [[ $valid_count -eq 0 ]]; then
+                log "ERROR" "No valid drives selected"
+                continue
+            elif [[ ${#invalid_selections[@]} -gt 0 ]]; then
+                log "INFO" "Proceeding with $valid_count valid drive selection(s)"
+            fi
         fi
         
         # Show selected drives
@@ -545,9 +604,19 @@ EOF
         
         echo
         log "WARNING" "⚠️  This will PERMANENTLY DELETE ALL DATA on ${#drives_to_format[@]} drive(s)!"
-        read -p "⚠️  Are you absolutely sure you want to continue? (y/N): " -r
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            log "INFO" "Operation cancelled"
+        echo
+        log "WARNING" "📋 Drives to be formatted:"
+        for drive in "${drives_to_format[@]}"; do
+            local drive_info
+            drive_info=$(get_drive_info "$drive")
+            log "WARNING" "     • /dev/$drive - $drive_info"
+        done
+        echo
+        log "WARNING" "❗ This action cannot be undone!"
+        echo
+        read -p "⚠️  Type 'yes' to proceed with formatting these ${#drives_to_format[@]} drive(s): " -r confirm_format
+        if [[ "$confirm_format" != "yes" ]]; then
+            log "INFO" "Operation cancelled (you must type exactly 'yes' to proceed)"
             continue
         fi
         
@@ -558,28 +627,71 @@ EOF
         echo "  2. xfs (good for large files and high performance)"
         echo "  3. btrfs (advanced features, snapshots, compression)"
         echo
-        read -p "Filesystem choice (1-3, default: 1): " -r fs_choice
         
         local filesystem="ext4"
-        case "$fs_choice" in
-            2) filesystem="xfs" ;;
-            3) filesystem="btrfs" ;;
-            *) filesystem="ext4" ;;
-        esac
+        while true; do
+            read -p "Filesystem choice (1-3, default: 1): " -r fs_choice
+            case "$fs_choice" in
+                ""|1) 
+                    filesystem="ext4"
+                    break
+                    ;;
+                2) 
+                    filesystem="xfs"
+                    break
+                    ;;
+                3) 
+                    filesystem="btrfs"
+                    break
+                    ;;
+                *) 
+                    log "ERROR" "Invalid choice '$fs_choice'. Please enter 1, 2, or 3."
+                    ;;
+            esac
+        done
+        
+        log "INFO" "Selected filesystem: $filesystem"
         
         # Optional label
         echo
-        read -p "Enter optional label for drives (leave empty for no label): " -r label
+        while true; do
+            read -p "Enter optional label for drives (leave empty for no label): " -r label
+            
+            # Validate label if provided
+            if [[ -n "$label" ]]; then
+                # Check for valid filesystem label characters (avoid special characters)
+                if [[ "$label" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+                    if [[ ${#label} -le 16 ]]; then
+                        log "INFO" "Using label: $label"
+                        break
+                    else
+                        log "ERROR" "Label too long (max 16 characters). Please enter a shorter label."
+                    fi
+                else
+                    log "ERROR" "Invalid label. Use only letters, numbers, hyphens, and underscores."
+                fi
+            else
+                log "INFO" "No label will be applied"
+                break
+            fi
+        done
         
         # Format drives
         echo
-        log "INFO" "Starting formatting process..."
+        log "INFO" "🚀 Starting formatting process for ${#drives_to_format[@]} drive(s)..."
+        log "INFO" "Filesystem: $filesystem"
+        if [[ -n "$label" ]]; then
+            log "INFO" "Label: $label"
+        fi
+        echo
+        
         local success_count=0
         local failed_drives=()
+        local drive_counter=1
         
         for drive in "${drives_to_format[@]}"; do
             echo
-            log "INFO" "Formatting /dev/$drive..."
+            log "INFO" "📀 [$drive_counter/${#drives_to_format[@]}] Formatting /dev/$drive..."
             
             # Use a subshell to contain any errors from format_drive
             # Disable exit on error for this section to ensure we continue with all drives
@@ -593,11 +705,13 @@ EOF
             
             if [[ $format_result -eq 0 ]]; then
                 ((success_count++))
-                log "INFO" "✅ Successfully formatted /dev/$drive"
+                log "INFO" "✅ [$drive_counter/${#drives_to_format[@]}] Successfully formatted /dev/$drive"
             else
                 failed_drives+=("$drive")
-                log "ERROR" "❌ Failed to format /dev/$drive"
+                log "ERROR" "❌ [$drive_counter/${#drives_to_format[@]}] Failed to format /dev/$drive"
             fi
+            
+            ((drive_counter++))
         done
         
         echo
@@ -618,21 +732,46 @@ EOF
         fi
         
         echo
-        log "INFO" "Final drive status:"
+        log "INFO" "📊 Final drive status:"
         for drive in "${drives_to_format[@]}"; do
             echo
-            log "INFO" "/dev/$drive:"
+            log "INFO" "Drive /dev/$drive:"
             # Use more robust error handling for status display
-            if ! lsblk "/dev/$drive" 2>/dev/null; then
+            if ! lsblk "/dev/$drive" -o NAME,SIZE,FSTYPE,LABEL 2>/dev/null; then
                 log "WARNING" "Could not display detailed status for /dev/$drive"
                 # Try basic info as fallback
                 if [[ -b "/dev/$drive" ]]; then
-                    log "INFO" "Drive /dev/$drive exists but status unavailable"
+                    log "INFO" "  Drive exists but status unavailable"
                 else
-                    log "WARNING" "Drive /dev/$drive no longer exists"
+                    log "WARNING" "  Drive no longer exists"
                 fi
             fi
         done
+        
+        # Show summary of successful operations
+        if [[ $success_count -gt 0 ]]; then
+            echo
+            log "INFO" "📈 Summary of successfully formatted drives:"
+            for drive in "${drives_to_format[@]}"; do
+                # Check if this drive was successfully formatted
+                local was_successful=true
+                for failed_drive in "${failed_drives[@]}"; do
+                    if [[ "$drive" == "$failed_drive" ]]; then
+                        was_successful=false
+                        break
+                    fi
+                done
+                
+                if $was_successful; then
+                    local drive_info
+                    drive_info=$(get_drive_info "$drive" 2>/dev/null || echo "info unavailable")
+                    log "INFO" "  ✅ /dev/$drive - $filesystem filesystem"
+                    if [[ -n "$label" ]]; then
+                        log "INFO" "     Label: $label"
+                    fi
+                fi
+            done
+        fi
         
         break
     done
