@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Hetzner Proxmox System Setup Script
-# This script optimizes the host system for Proxmox and ensures a /data partition exists
+# This script optimizes the host system for Proxmox and sets up a /data directory for storage
 
 set -euo pipefail
 
@@ -245,6 +245,96 @@ apply_sysctl_safe() {
     fi
 }
 
+# Function to setup /data storage for Proxmox
+setup_data_storage() {
+    log "INFO" "Setting up /data storage for Proxmox..."
+    
+    local data_dir="/data"
+    local storage_name="data"
+    
+    # Create the data directory if it doesn't exist
+    if [[ ! -d "$data_dir" ]]; then
+        log "INFO" "Creating $data_dir directory..."
+        mkdir -p "$data_dir"
+        
+        # Set appropriate permissions
+        chown root:root "$data_dir"
+        chmod 755 "$data_dir"
+        log "INFO" "Created $data_dir with appropriate permissions"
+    else
+        log "INFO" "$data_dir directory already exists"
+    fi
+    
+    # Check if we have Proxmox VE tools available
+    if ! command -v pvesm >/dev/null 2>&1; then
+        log "WARNING" "Proxmox VE tools not found - storage will be created when Proxmox is installed"
+        log "INFO" "Directory $data_dir is ready for Proxmox storage configuration"
+        return 0
+    fi
+    
+    # Add to Proxmox storage configuration if not already present
+    if ! pvesm status -storage "$storage_name" &>/dev/null; then
+        log "INFO" "Adding $data_dir as Proxmox storage '$storage_name'..."
+        if pvesm add dir "$storage_name" --path "$data_dir" --content "images,vztmpl,iso,snippets,backup"; then
+            log "INFO" "Successfully added storage '$storage_name' to Proxmox"
+        else
+            log "WARNING" "Failed to add storage '$storage_name' to Proxmox (this is normal if Proxmox is not yet installed)"
+        fi
+    else
+        log "INFO" "Storage '$storage_name' already exists in Proxmox"
+    fi
+    
+    # Show storage information
+    log "INFO" "Data storage configuration:"
+    log "INFO" "  Path: $data_dir"
+    log "INFO" "  Storage name: $storage_name"
+    log "INFO" "  Available space: $(df -h "$data_dir" 2>/dev/null | tail -1 | awk '{print $4}' || echo 'Unknown')"
+}
+
+# Function to configure data storage in Proxmox (post-installation)
+configure_proxmox_data_storage() {
+    log "INFO" "Configuring /data storage in Proxmox..."
+    
+    local data_dir="/data"
+    local storage_name="data"
+    
+    # Check if Proxmox VE tools are available
+    if ! command -v pvesm >/dev/null 2>&1; then
+        log "ERROR" "Proxmox VE tools not found. Please install Proxmox VE first."
+        return 1
+    fi
+    
+    # Ensure data directory exists
+    if [[ ! -d "$data_dir" ]]; then
+        log "INFO" "Creating $data_dir directory..."
+        mkdir -p "$data_dir"
+        chown root:root "$data_dir"
+        chmod 755 "$data_dir"
+    fi
+    
+    # Add to Proxmox storage configuration if not already present
+    if ! pvesm status -storage "$storage_name" &>/dev/null; then
+        log "INFO" "Adding $data_dir as Proxmox storage '$storage_name'..."
+        if pvesm add dir "$storage_name" --path "$data_dir" --content "images,vztmpl,iso,snippets,backup"; then
+            log "INFO" "Successfully added storage '$storage_name' to Proxmox"
+            
+            # Show current storage status
+            log "INFO" "Current Proxmox storage configuration:"
+            pvesm status
+        else
+            log "ERROR" "Failed to add storage '$storage_name' to Proxmox"
+            return 1
+        fi
+    else
+        log "INFO" "Storage '$storage_name' already exists in Proxmox"
+        # Show current storage status
+        log "INFO" "Current Proxmox storage configuration:"
+        pvesm status
+    fi
+    
+    return 0
+}
+
 # Main function
 main() {
     # Parse arguments
@@ -257,7 +347,8 @@ Usage: $0 [OPTIONS]
 Optimize the Proxmox host system for performance.
 
 OPTIONS:
-    --help      Show this help message
+    --help                Show this help message
+    --configure-storage   Configure /data storage in Proxmox (post-installation only)
 
 OPTIMIZATIONS PERFORMED:
     - System package updates
@@ -268,12 +359,18 @@ OPTIMIZATIONS PERFORMED:
     - Log rotation setup
     - Time synchronization
     - IRQ balancing
+    - /data directory setup
 
 EXAMPLES:
-    $0                  # Run system optimization
+    $0                        # Run system optimization and setup /data directory
+    $0 --configure-storage    # Add /data to Proxmox storage (after Proxmox installation)
 
 EOF
                 exit 0
+                ;;
+            --configure-storage)
+                configure_proxmox_data_storage
+                exit $?
                 ;;
             *)
                 log "ERROR" "Unknown option: $1"
@@ -291,6 +388,10 @@ EOF
     log "INFO" "Starting Proxmox system optimization..."
     echo
     
+    # Setup data storage
+    setup_data_storage
+    echo
+    
     # Optimize system
     optimize_system
     echo
@@ -304,14 +405,16 @@ EOF
     log "INFO" "- Time synchronization with chrony"
     log "INFO" "- Log rotation configured"
     log "INFO" "- Tuned virtualization profile active"
+    log "INFO" "- /data storage configured for Proxmox"
     echo
     
     log "INFO" "Next steps:"
-    log "INFO" "1. Mount /data partition with remaining drive space"
-    log "INFO" "2. Reboot to ensure all optimizations are active"
-    log "INFO" "3. Format additional drives: ./install.sh --format-drives"
-    log "INFO" "4. Setup RAID mirrors: ./install.sh --setup-mirrors"
-    log "INFO" "5. Configure network: ./install.sh --network"
+    log "INFO" "1. /data directory is ready for use"
+    log "INFO" "2. Reboot to ensure all optimizations are active" 
+    log "INFO" "3. After Proxmox installation: run './scripts/setup-system.sh --configure-storage'"
+    log "INFO" "4. Format additional drives: ./install.sh --format-drives"
+    log "INFO" "5. Setup RAID mirrors: ./install.sh --setup-mirrors"
+    log "INFO" "6. Configure network: ./install.sh --network"
 }
 
 # Execute main function if script is run directly
