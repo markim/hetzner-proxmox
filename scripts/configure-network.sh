@@ -840,18 +840,45 @@ EOF
         
         # Show current network status
         log "INFO" "Current network configuration:"
-        log "INFO" "=== Physical Interface ($SSH_INTERFACE) ==="
-        ip addr show "$SSH_INTERFACE" | grep "inet " | while IFS= read -r line; do
-            log "INFO" "  $line"
-        done
+        
+        # Show physical interface (should be enslaved to bridge now)
+        local physical_iface="${PHYSICAL_INTERFACE:-$SSH_INTERFACE}"
+        if [[ "$SSH_INTERFACE" == "vmbr0" ]]; then
+            physical_iface="${PHYSICAL_INTERFACE}"
+        fi
+        
+        log "INFO" "=== Physical Interface ($physical_iface) ==="
+        if ip addr show "$physical_iface" >/dev/null 2>&1; then
+            local physical_addrs
+            physical_addrs=$(ip addr show "$physical_iface" 2>/dev/null | grep "inet " || true)
+            if [[ -n "$physical_addrs" ]]; then
+                echo "$physical_addrs" | while IFS= read -r line; do
+                    log "INFO" "  $line"
+                done
+            else
+                log "INFO" "  No IP addresses (enslaved to bridge)"
+            fi
+        else
+            log "WARN" "  Interface not found or not accessible"
+        fi
+        
         log "INFO" "=== WAN Bridge (vmbr0) ==="
-        ip addr show vmbr0 2>/dev/null | grep "inet " | while IFS= read -r line; do
-            log "INFO" "  $line"
-        done || log "INFO" "  vmbr0 not yet active (restart required)"
+        if ip addr show vmbr0 >/dev/null 2>&1; then
+            ip addr show vmbr0 2>/dev/null | grep "inet " | while IFS= read -r line; do
+                log "INFO" "  $line"
+            done
+        else
+            log "INFO" "  vmbr0 not yet active (restart required)"
+        fi
+        
         log "INFO" "=== LAN Bridge (vmbr1) ==="
-        ip addr show vmbr1 2>/dev/null | grep "inet " | while IFS= read -r line; do
-            log "INFO" "  $line"
-        done || log "INFO" "  vmbr1 not yet active (restart required)"
+        if ip addr show vmbr1 >/dev/null 2>&1; then
+            ip addr show vmbr1 2>/dev/null | grep "inet " | while IFS= read -r line; do
+                log "INFO" "  $line"
+            done
+        else
+            log "INFO" "  vmbr1 not yet active (restart required)"
+        fi
         
     else
         log "ERROR" "Failed to restart networking service"
