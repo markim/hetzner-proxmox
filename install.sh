@@ -13,7 +13,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/common.sh"
 
 # Load default environment (will be overridden by parse_args if needed)
-load_env
+# Only load_env if we're not just showing help
+if [[ "${1:-}" != "--help" ]] && [[ "${1:-}" != "-h" ]] && [[ "${1:-}" != "" ]]; then
+    load_env 2>/dev/null || true
+fi
 
 # Usage information
 usage() {
@@ -262,23 +265,9 @@ validate_setup() {
                 exit 1
             fi
             ;;
-        "all")
-            # Validate for both network and caddy
-            validate_env "DOMAIN" "EMAIL"
-            if [[ ! "$DOMAIN" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*\.[a-zA-Z]{2,}$ ]]; then
-                log "ERROR" "Invalid domain name: $DOMAIN"
-                exit 1
-            fi
-            ;;
         "check-mac")
             # MAC address check doesn't require special validation - it just checks configuration
             log "INFO" "MAC address configuration check - no prerequisites required"
-            ;;
-        "all")
-            # Disabled for safety
-            log "ERROR" "The --all command has been disabled for safety"
-            log "ERROR" "Please run individual components manually"
-            exit 1
             ;;
         *)
             # No command specified - just show usage
@@ -909,3 +898,15 @@ main() {
             ;;
     esac
 }
+
+# Main execution
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    # Parse command line arguments
+    parse_args "$@"
+    
+    # Validate setup requirements
+    validate_setup
+    
+    # Execute main function
+    main
+fi
