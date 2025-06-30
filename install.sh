@@ -28,6 +28,7 @@ Automated setup for Hetzner Proxmox server with Caddy reverse proxy and HTTPS.
 COMMANDS:
     (no command)        Show this help and available commands
     --drives            Scan drives and configure optimal RAID arrays
+    --clear-raids       Remove all non-system RAID arrays (safe cleanup)
     --caddy             Install and configure Caddy with HTTPS (current functionality)
     --network           Configure network interfaces for additional Hetzner IPs
     --pfsense           Create and configure pfSense firewall VM (requires --network first)
@@ -43,6 +44,7 @@ EXAMPLES:
     $0                          # Show available commands (safe - shows help only)
     $0 --check-mac              # Verify MAC address configuration (recommended first step)
     $0 --drives                 # Scan drives and show optimal RAID configurations
+    $0 --clear-raids            # Remove all non-system RAID arrays (for cleanup/reset)
     $0 --caddy                  # Install Caddy with current configuration
     $0 --network                # Configure network interfaces for additional IPs
     $0 --pfsense                # Create pfSense VM after network configuration
@@ -107,6 +109,10 @@ parse_args() {
                 command="drives"
                 shift
                 ;;
+            --clear-raids)
+                command="clear-raids"
+                shift
+                ;;
             --help|-h)
                 usage
                 exit 0
@@ -135,7 +141,7 @@ parse_args() {
                 export RAID_CONFIG="$2"
                 shift 2
                 ;;
-            --caddy|--network|--pfsense|--firewalladmin|--check-mac|--drives)
+            --caddy|--network|--pfsense|--firewalladmin|--check-mac|--drives|--clear-raids)
                 # Already handled above
                 shift
                 ;;
@@ -217,6 +223,18 @@ validate_setup() {
             fi
             if ! command -v mdadm &> /dev/null; then
                 log "ERROR" "mdadm command not found. Required for RAID management."
+                exit 1
+            fi
+            ;;
+        "clear-raids")
+            # RAID removal - check we have the required tools
+            log "INFO" "RAID removal - checking for required tools"
+            if ! command -v mdadm &> /dev/null; then
+                log "ERROR" "mdadm command not found. Required for RAID management."
+                exit 1
+            fi
+            if ! command -v findmnt &> /dev/null; then
+                log "ERROR" "findmnt command not found. Required for mount detection."
                 exit 1
             fi
             ;;
@@ -420,6 +438,25 @@ run_drives_setup() {
     log "INFO" "Logs are available at: $LOG_FILE"
 }
 
+# Run RAID cleanup
+run_clear_raids() {
+    log "INFO" "Starting RAID array cleanup..."
+    log "INFO" "Logs are being written to: $LOG_FILE"
+    
+    # Run RAID removal script
+    run_script "scripts/remove-raids.sh"
+    
+    log "INFO" "✅ RAID Cleanup Complete!"
+    log "INFO" "Non-system RAID arrays have been safely removed"
+    log "INFO" ""
+    log "INFO" "Next Steps:"
+    log "INFO" "1. Run drive configuration: $0 --drives"
+    log "INFO" "2. Configure network: $0 --network"
+    log "INFO" "3. Install Caddy: $0 --caddy"
+    log "INFO" ""
+    log "INFO" "Logs are available at: $LOG_FILE"
+}
+
 # Main installation function
 main() {
     case "${COMMAND:-}" in
@@ -441,6 +478,9 @@ main() {
         "drives")
             run_drives_setup
             ;;
+        "clear-raids")
+            run_clear_raids
+            ;;
         *)
             # No command specified - show usage and exit safely
             log "INFO" "Hetzner Proxmox Setup Script"
@@ -450,7 +490,7 @@ main() {
             echo
             log "INFO" "Available commands:"
             log "INFO" "  --check-mac      ⭐ START HERE - Verify MAC address configuration"
-            log "INFO" "  --format-drives  ⚠️  Format all non-system drives and remove RAID arrays"
+            log "INFO" "  --clear-raids    🧹 Remove all non-system RAID arrays (cleanup/reset)"
             log "INFO" "  --drives         🔧 Prepare drives and configure RAID arrays"
             log "INFO" "  --caddy          🌐 Install Caddy reverse proxy with HTTPS"
             log "INFO" "  --network        🔗 Configure network interfaces for additional IPs"
