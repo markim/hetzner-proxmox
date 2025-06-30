@@ -351,73 +351,6 @@ run_script() {
     fi
 }
 
-# Main installation function
-main() {
-    case "${COMMAND:-}" in
-        "preparedrives")
-            # shellcheck disable=SC2119
-            run_drive_preparation
-            ;;
-        "format-drives")
-            run_drive_formatting
-            ;;
-        "caddy")
-            run_caddy_setup
-            ;;
-        "network")
-            run_network_setup
-            ;;
-        "pfsense")
-            run_pfsense_setup
-            ;;
-        "firewalladmin")
-            run_firewall_admin_setup
-            ;;
-        "check-mac")
-            run_mac_check
-            ;;
-        "all")
-            log "ERROR" "The --all command has been disabled for safety"
-            log "ERROR" "Please run individual components in this order:"
-            log "ERROR" "  1. $0 --check-mac       # Verify MAC addresses"
-            log "ERROR" "  2. $0 --network         # Configure network"
-            log "ERROR" "  3. $0 --caddy           # Install Caddy"
-            log "ERROR" "  4. $0 --pfsense         # Setup pfSense (optional)"
-            log "ERROR" "  5. $0 --firewalladmin   # Setup admin VM (optional)"
-            exit 1
-            ;;
-        *)
-            # No command specified - show usage and exit safely
-            log "INFO" "Hetzner Proxmox Setup Script"
-            log "INFO" "=============================="
-            echo
-            log "INFO" "⚠️  No command specified. This script requires explicit commands for safety."
-            echo
-            log "INFO" "Available commands:"
-            log "INFO" "  --check-mac      ⭐ START HERE - Verify MAC address configuration"
-            log "INFO" "  --format-drives  ⚠️  Format all non-system drives and remove RAID arrays"
-            log "INFO" "  --preparedrives  🔧 Prepare drives and configure RAID arrays"
-            log "INFO" "  --caddy          🌐 Install Caddy reverse proxy with HTTPS"
-            log "INFO" "  --network        🔗 Configure network interfaces for additional IPs"
-            log "INFO" "  --pfsense        🔥 Create pfSense firewall VM (requires --network first)"
-            log "INFO" "  --firewalladmin  🖥️  Create firewall admin container (requires --pfsense first)"
-            echo
-            log "INFO" "Safety features:"
-            log "INFO" "  --dry-run        Preview changes without executing"
-            log "INFO" "  --verbose        Enable detailed logging"
-            log "INFO" "  --help           Show detailed usage information"
-            echo
-            log "INFO" "Recommended first-time workflow:"
-            log "INFO" "  1. $0 --check-mac --dry-run     # Verify your configuration"
-            log "INFO" "  2. $0 --network --dry-run       # Preview network changes"
-            log "INFO" "  3. $0 --caddy --dry-run         # Preview Caddy installation"
-            log "INFO" "  4. Remove --dry-run to execute for real"
-            echo
-            log "INFO" "⚠️  NEVER run without specifying a command - this prevents accidental execution!"
-            exit 0
-            ;;
-    esac
-}
 
 # Run Caddy setup (original functionality)
 run_caddy_setup() {
@@ -758,53 +691,6 @@ format_drive() {
     log "INFO" "Drive formatted successfully: $drive"
 }
 
-# Main function
-main() {
-    log "INFO" "Starting drive formatting process..."
-    
-    # Get non-system drives
-    local non_system_drives
-    mapfile -t non_system_drives < <(get_non_system_drives)
-    
-    if [[ ${#non_system_drives[@]} -eq 0 ]]; then
-        log "INFO" "No non-system drives found to format"
-        return 0
-    fi
-    
-    log "INFO" "Non-system drives to be formatted:"
-    for drive in "${non_system_drives[@]}"; do
-        local size model
-        size=$(lsblk -ndo SIZE "$drive" 2>/dev/null || echo "Unknown")
-        model=$(lsblk -ndo MODEL "$drive" 2>/dev/null || echo "Unknown")
-        log "INFO" "  📀 $drive ($size) - $model"
-    done
-    
-    if [[ "$DRY_RUN" == "false" ]]; then
-        log "WARN" "⚠️  WARNING: This will permanently destroy all data on the above drives!"
-        log "WARN" "⚠️  Are you sure you want to continue? (Type 'yes' to confirm)"
-        read -r confirmation
-        if [[ "$confirmation" != "yes" ]]; then
-            log "INFO" "Operation cancelled by user"
-            exit 0
-        fi
-    fi
-    
-    # Stop RAID arrays first
-    stop_raid_arrays
-    
-    # Format each non-system drive
-    for drive in "${non_system_drives[@]}"; do
-        format_drive "$drive"
-    done
-    
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log "INFO" "DRY RUN completed - no changes were made"
-    else
-        log "INFO" "✅ All non-system drives have been formatted successfully"
-        log "INFO" "Drives are now ready for fresh RAID configuration"
-    fi
-}
-
 # Run drive preparation
 run_drive_preparation() {
     log "INFO" "Starting Hetzner Proxmox drive preparation..."
@@ -964,4 +850,62 @@ run_mac_check() {
     log "INFO" "2. Caddy setup: $0 --caddy"
     log "INFO" ""
     log "INFO" "Logs are available at: $LOG_FILE"
+}
+
+# Main installation function
+main() {
+    case "${COMMAND:-}" in
+        "preparedrives")
+            # shellcheck disable=SC2119
+            run_drive_preparation
+            ;;
+        "format-drives")
+            run_drive_formatting
+            ;;
+        "caddy")
+            run_caddy_setup
+            ;;
+        "network")
+            run_network_setup
+            ;;
+        "pfsense")
+            run_pfsense_setup
+            ;;
+        "firewalladmin")
+            run_firewall_admin_setup
+            ;;
+        "check-mac")
+            run_mac_check
+            ;;
+        *)
+            # No command specified - show usage and exit safely
+            log "INFO" "Hetzner Proxmox Setup Script"
+            log "INFO" "=============================="
+            echo
+            log "INFO" "⚠️  No command specified. This script requires explicit commands for safety."
+            echo
+            log "INFO" "Available commands:"
+            log "INFO" "  --check-mac      ⭐ START HERE - Verify MAC address configuration"
+            log "INFO" "  --format-drives  ⚠️  Format all non-system drives and remove RAID arrays"
+            log "INFO" "  --preparedrives  🔧 Prepare drives and configure RAID arrays"
+            log "INFO" "  --caddy          🌐 Install Caddy reverse proxy with HTTPS"
+            log "INFO" "  --network        🔗 Configure network interfaces for additional IPs"
+            log "INFO" "  --pfsense        🔥 Create pfSense firewall VM (requires --network first)"
+            log "INFO" "  --firewalladmin  🖥️  Create firewall admin container (requires --pfsense first)"
+            echo
+            log "INFO" "Safety features:"
+            log "INFO" "  --dry-run        Preview changes without executing"
+            log "INFO" "  --verbose        Enable detailed logging"
+            log "INFO" "  --help           Show detailed usage information"
+            echo
+            log "INFO" "Recommended first-time workflow:"
+            log "INFO" "  1. $0 --check-mac --dry-run     # Verify your configuration"
+            log "INFO" "  2. $0 --network --dry-run       # Preview network changes"
+            log "INFO" "  3. $0 --caddy --dry-run         # Preview Caddy installation"
+            log "INFO" "  4. Remove --dry-run to execute for real"
+            echo
+            log "INFO" "⚠️  NEVER run without specifying a command - this prevents accidental execution!"
+            exit 0
+            ;;
+    esac
 }
