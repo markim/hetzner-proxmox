@@ -31,7 +31,6 @@ COMMANDS:
     --pfsense           Create and configure pfSense firewall VM (requires --network first)
     --firewalladmin     Create Fedora container for firewall administration (requires --pfsense first)
     --check-mac         Verify MAC address configuration for additional IPs
-    --all               Run complete setup (network + caddy) - FUTURE
 
 OPTIONS:
     -h, --help          Show this help message
@@ -40,7 +39,8 @@ OPTIONS:
     -v, --verbose       Enable verbose logging
 
 EXAMPLES:
-    $0                          # Show available commands
+    $0                          # Show available commands (safe - shows help only)
+    $0 --check-mac              # Verify MAC address configuration (recommended first step)
     $0 --format-drives          # Format all non-system drives and remove RAID arrays
     $0 --format-drives --dry-run # Preview which drives would be formatted
     $0 --preparedrives          # Scan drives and show optimal RAID configurations
@@ -51,6 +51,15 @@ EXAMPLES:
     $0 --firewalladmin          # Create firewall admin container after pfSense setup
     $0 --caddy -c prod.env      # Use custom environment file
     $0 --network --dry-run      # Show network changes without executing
+
+RECOMMENDED WORKFLOW:
+    1. $0 --check-mac           # Verify MAC addresses are correct
+    2. $0 --network --dry-run   # Preview network configuration
+    3. $0 --network             # Apply network configuration
+    4. $0 --caddy --dry-run     # Preview Caddy installation
+    5. $0 --caddy               # Install Caddy reverse proxy
+    6. $0 --pfsense             # (Optional) Create pfSense firewall
+    7. $0 --firewalladmin       # (Optional) Create admin VM for pfSense
 
 REQUIREMENTS:
     - Fresh Proxmox installation on Hetzner server
@@ -109,10 +118,6 @@ parse_args() {
                 command="check-mac"
                 shift
                 ;;
-            --all)
-                command="all"
-                shift
-                ;;
             --help|-h)
                 usage
                 exit 0
@@ -145,7 +150,7 @@ parse_args() {
                 export RAID_CONFIG="$2"
                 shift 2
                 ;;
-            --caddy|--network|--pfsense|--firewalladmin|--check-mac|--all|--preparedrives|--format-drives)
+            --caddy|--network|--pfsense|--firewalladmin|--check-mac|--preparedrives|--format-drives)
                 # Already handled above
                 shift
                 ;;
@@ -173,6 +178,20 @@ parse_args() {
     
     export DRY_RUN="$dry_run"
     export COMMAND="$command"
+    
+    # Safety check for destructive commands
+    if [[ "$command" == "format-drives" ]] && [[ "$dry_run" == "false" ]]; then
+        log "WARN" "⚠️  You are about to FORMAT ALL NON-SYSTEM DRIVES!"
+        log "WARN" "⚠️  This will PERMANENTLY DESTROY ALL DATA on those drives!"
+        log "WARN" "⚠️  Consider running with --dry-run first to preview the changes."
+        echo
+        log "WARN" "Type 'I UNDERSTAND AND WANT TO FORMAT DRIVES' to continue:"
+        read -r confirmation
+        if [[ "$confirmation" != "I UNDERSTAND AND WANT TO FORMAT DRIVES" ]]; then
+            log "INFO" "Operation cancelled for safety. Use --dry-run to preview changes."
+            exit 0
+        fi
+    fi
 }
 
 # Validate environment and requirements
@@ -254,6 +273,12 @@ validate_setup() {
         "check-mac")
             # MAC address check doesn't require special validation - it just checks configuration
             log "INFO" "MAC address configuration check - no prerequisites required"
+            ;;
+        "all")
+            # Disabled for safety
+            log "ERROR" "The --all command has been disabled for safety"
+            log "ERROR" "Please run individual components manually"
+            exit 1
             ;;
         *)
             # No command specified - just show usage
@@ -352,27 +377,43 @@ main() {
             run_mac_check
             ;;
         "all")
-            run_complete_setup
+            log "ERROR" "The --all command has been disabled for safety"
+            log "ERROR" "Please run individual components in this order:"
+            log "ERROR" "  1. $0 --check-mac       # Verify MAC addresses"
+            log "ERROR" "  2. $0 --network         # Configure network"
+            log "ERROR" "  3. $0 --caddy           # Install Caddy"
+            log "ERROR" "  4. $0 --pfsense         # Setup pfSense (optional)"
+            log "ERROR" "  5. $0 --firewalladmin   # Setup admin VM (optional)"
+            exit 1
             ;;
         *)
-            # No command specified - show usage
+            # No command specified - show usage and exit safely
             log "INFO" "Hetzner Proxmox Setup Script"
             log "INFO" "=============================="
             echo
-            log "INFO" "Available commands:"
-            log "INFO" "  --format-drives  Format all non-system drives and remove RAID arrays"
-            log "INFO" "  --preparedrives  Prepare drives and configure RAID arrays"
-            log "INFO" "  --caddy    Install Caddy reverse proxy with HTTPS"
-            log "INFO" "  --network  Configure network interfaces for additional IPs"
-            log "INFO" "  --pfsense  Create pfSense firewall VM (requires --network first)"
-            log "INFO" "  --firewalladmin  Create firewall admin container (requires --pfsense first)"
-            log "INFO" "  --check-mac  Verify MAC address configuration for additional IPs"
-            log "INFO" "  --all      Complete setup (network + caddy) [FUTURE]"
+            log "INFO" "⚠️  No command specified. This script requires explicit commands for safety."
             echo
-            log "INFO" "Use --help for detailed information"
-            log "INFO" "Examples:"
-            log "INFO" "  $0 --format-drives --dry-run     # Preview drive formatting"
-            log "INFO" "  $0 --preparedrives --dry-run     # Preview RAID setup"
+            log "INFO" "Available commands:"
+            log "INFO" "  --check-mac      ⭐ START HERE - Verify MAC address configuration"
+            log "INFO" "  --format-drives  ⚠️  Format all non-system drives and remove RAID arrays"
+            log "INFO" "  --preparedrives  🔧 Prepare drives and configure RAID arrays"
+            log "INFO" "  --caddy          🌐 Install Caddy reverse proxy with HTTPS"
+            log "INFO" "  --network        🔗 Configure network interfaces for additional IPs"
+            log "INFO" "  --pfsense        🔥 Create pfSense firewall VM (requires --network first)"
+            log "INFO" "  --firewalladmin  🖥️  Create firewall admin container (requires --pfsense first)"
+            echo
+            log "INFO" "Safety features:"
+            log "INFO" "  --dry-run        Preview changes without executing"
+            log "INFO" "  --verbose        Enable detailed logging"
+            log "INFO" "  --help           Show detailed usage information"
+            echo
+            log "INFO" "Recommended first-time workflow:"
+            log "INFO" "  1. $0 --check-mac --dry-run     # Verify your configuration"
+            log "INFO" "  2. $0 --network --dry-run       # Preview network changes"
+            log "INFO" "  3. $0 --caddy --dry-run         # Preview Caddy installation"
+            log "INFO" "  4. Remove --dry-run to execute for real"
+            echo
+            log "INFO" "⚠️  NEVER run without specifying a command - this prevents accidental execution!"
             exit 0
             ;;
     esac
@@ -764,8 +805,163 @@ main() {
     fi
 }
 
-# Script entry point
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-    parse_args "$@"
-    main
-fi
+# Run drive preparation
+run_drive_preparation() {
+    log "INFO" "Starting Hetzner Proxmox drive preparation..."
+    log "INFO" "Logs are being written to: $LOG_FILE"
+    
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        log "INFO" "DRY RUN MODE - No changes will be made"
+    fi
+    
+    # Run drive preparation script
+    local script_path="$SCRIPT_DIR/scripts/prepare-drives.sh"
+    
+    if [[ ! -f "$script_path" ]]; then
+        log "ERROR" "Drive preparation script not found: $script_path"
+        exit 1
+    fi
+    
+    # Build arguments for the drive preparation script
+    local prep_args=()
+    
+    # Add dry-run flag if set
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        prep_args+=("--dry-run")
+    fi
+    
+    # Add verbose flag if set
+    if [[ "${LOG_LEVEL:-}" == "DEBUG" ]]; then
+        prep_args+=("--verbose")
+    fi
+    
+    # Add any additional drive args passed through
+    if [[ -n "${DRIVE_ARGS:-}" ]]; then
+        # Split DRIVE_ARGS and add to array
+        IFS=' ' read -ra additional_args <<< "${DRIVE_ARGS}"
+        prep_args+=("${additional_args[@]}")
+    fi
+    
+    log "INFO" "Executing drive preparation script..."
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        log "INFO" "Command: bash $script_path ${prep_args[*]}"
+    fi
+    
+    if ! bash "$script_path" "${prep_args[@]}"; then
+        log "ERROR" "Drive preparation failed"
+        exit 1
+    fi
+    
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        log "INFO" "DRY RUN completed - no changes were made"
+        log "INFO" "To execute for real, run without --dry-run flag"
+    else
+        log "INFO" "✅ Drive Preparation Complete!"
+        log "INFO" "Drive preparation has been completed successfully"
+        log "INFO" ""
+        log "INFO" "Next Steps:"
+        log "INFO" "1. Review any RAID configurations that were created"
+        log "INFO" "2. Continue with network setup: $0 --network"
+        log "INFO" "3. Install Caddy: $0 --caddy"
+        log "INFO" ""
+        log "INFO" "Logs are available at: $LOG_FILE"
+    fi
+}
+
+# Run network setup
+run_network_setup() {
+    log "INFO" "Starting Hetzner Proxmox network configuration..."
+    log "INFO" "Logs are being written to: $LOG_FILE"
+    
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        log "INFO" "DRY RUN MODE - No changes will be made"
+    fi
+    
+    # Run network configuration script
+    run_script "scripts/configure-network.sh"
+    
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        log "INFO" "DRY RUN completed - no changes were made"
+        log "INFO" "To execute for real, run without --dry-run flag"
+    else
+        log "INFO" "✅ Network Configuration Complete!"
+        log "INFO" "Network bridges have been configured successfully"
+        log "INFO" ""
+        log "INFO" "Next Steps:"
+        log "INFO" "1. Install Caddy: $0 --caddy"
+        log "INFO" "2. Create pfSense VM: $0 --pfsense"
+        log "INFO" ""
+        log "INFO" "Logs are available at: $LOG_FILE"
+    fi
+}
+
+# Run pfSense setup
+run_pfsense_setup() {
+    log "INFO" "Starting Hetzner Proxmox pfSense setup..."
+    log "INFO" "Logs are being written to: $LOG_FILE"
+    
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        log "INFO" "DRY RUN MODE - No changes will be made"
+    fi
+    
+    # Run pfSense setup script
+    run_script "scripts/setup-pfsense.sh"
+    
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        log "INFO" "DRY RUN completed - no changes were made"
+        log "INFO" "To execute for real, run without --dry-run flag"
+    else
+        log "INFO" "✅ pfSense Setup Complete!"
+        log "INFO" "pfSense VM has been created successfully"
+        log "INFO" ""
+        log "INFO" "Next Steps:"
+        log "INFO" "1. Access pfSense via Proxmox console to complete initial setup"
+        log "INFO" "2. Create firewall admin VM: $0 --firewalladmin"
+        log "INFO" ""
+        log "INFO" "Logs are available at: $LOG_FILE"
+    fi
+}
+
+# Run firewall admin setup
+run_firewall_admin_setup() {
+    log "INFO" "Starting Hetzner Proxmox firewall admin setup..."
+    log "INFO" "Logs are being written to: $LOG_FILE"
+    
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        log "INFO" "DRY RUN MODE - No changes will be made"
+    fi
+    
+    # Run firewall admin setup script
+    run_script "scripts/setup-firewall-admin.sh"
+    
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        log "INFO" "DRY RUN completed - no changes were made"
+        log "INFO" "To execute for real, run without --dry-run flag"
+    else
+        log "INFO" "✅ Firewall Admin Setup Complete!"
+        log "INFO" "Firewall admin VM has been created successfully"
+        log "INFO" ""
+        log "INFO" "Next Steps:"
+        log "INFO" "1. Access the admin VM via Proxmox console"
+        log "INFO" "2. Use the admin VM to configure pfSense via web interface"
+        log "INFO" ""
+        log "INFO" "Logs are available at: $LOG_FILE"
+    fi
+}
+
+# Run MAC address check
+run_mac_check() {
+    log "INFO" "Starting MAC address verification..."
+    log "INFO" "Logs are being written to: $LOG_FILE"
+    
+    # Run MAC address check script
+    run_script "scripts/check-mac-addresses.sh"
+    
+    log "INFO" "✅ MAC Address Check Complete!"
+    log "INFO" ""
+    log "INFO" "If MAC addresses are correctly configured, proceed with:"
+    log "INFO" "1. Network setup: $0 --network"
+    log "INFO" "2. Caddy setup: $0 --caddy"
+    log "INFO" ""
+    log "INFO" "Logs are available at: $LOG_FILE"
+}
