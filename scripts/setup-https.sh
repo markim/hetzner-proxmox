@@ -156,10 +156,7 @@ main() {
         log "ERROR" "Caddy configuration test failed"
         exit 1
     fi
-    
-    # Configure firewall
-    configure_firewall
-    
+        
     # Start Caddy
     if ! start_caddy; then
         log "ERROR" "Failed to start Caddy"
