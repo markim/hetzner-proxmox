@@ -283,10 +283,14 @@ get_system_drive_free_space() {
     local lvm_free_space
     lvm_free_space=$(get_lvm_free_space "$drive")
     
-    if [[ "$lvm_free_space" -gt 0 ]]; then
-        log "DEBUG" "Found LVM free space: $lvm_free_space bytes"
+    log "DEBUG" "LVM free space returned: '$lvm_free_space' bytes"
+    
+    if [[ "$lvm_free_space" =~ ^[0-9]+$ ]] && [[ "$lvm_free_space" -gt 0 ]]; then
+        log "DEBUG" "Using LVM free space: $lvm_free_space bytes"
         echo "$lvm_free_space"
         return 0
+    else
+        log "DEBUG" "LVM free space invalid or zero: '$lvm_free_space'"
     fi
     
     # Fall back to regular partition-based calculation
@@ -387,25 +391,33 @@ get_lvm_free_space() {
                 
                 # Get free space in this volume group (in bytes)
                 local vg_free_bytes
-                vg_free_bytes=$(vgs --noheadings -o vg_free --units B "$vg_name" 2>/dev/null | tr -d ' B' || echo "0")
+                vg_free_bytes=$(vgs --noheadings -o vg_free --units B "$vg_name" 2>/dev/null | sed 's/[^0-9]//g' || echo "0")
                 
-                log "DEBUG" "VG $vg_name has free space: $vg_free_bytes bytes"
+                log "DEBUG" "VG $vg_name has free space: $vg_free_bytes bytes (raw)"
                 
-                if [[ "$vg_free_bytes" =~ ^[0-9]+$ ]]; then
+                # Ensure we have a valid number
+                if [[ "$vg_free_bytes" =~ ^[0-9]+$ ]] && [[ "$vg_free_bytes" -gt 0 ]]; then
                     total_free_bytes=$((total_free_bytes + vg_free_bytes))
+                    log "DEBUG" "Added $vg_free_bytes bytes to total, new total: $total_free_bytes bytes"
+                else
+                    log "DEBUG" "Invalid or zero vg_free_bytes: '$vg_free_bytes'"
                 fi
             fi
         fi
     done
     
-    log "DEBUG" "Total LVM free space: $total_free_bytes bytes"
+    log "DEBUG" "Total LVM free space calculated: $total_free_bytes bytes"
     
     # Only return if we have at least 10GB free
     local min_space_bytes=$((10 * 1024 * 1024 * 1024))
+    log "DEBUG" "Minimum space required: $min_space_bytes bytes (10GB)"
+    log "DEBUG" "Comparison: $total_free_bytes >= $min_space_bytes"
+    
     if [[ $total_free_bytes -ge $min_space_bytes ]]; then
+        log "DEBUG" "LVM free space meets minimum requirement, returning: $total_free_bytes"
         echo "$total_free_bytes"
     else
-        log "DEBUG" "LVM free space below minimum threshold (10GB)"
+        log "DEBUG" "LVM free space below minimum threshold (10GB): $total_free_bytes < $min_space_bytes"
         echo "0"
     fi
 }
