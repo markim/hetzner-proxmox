@@ -14,142 +14,140 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 # shellcheck disable=SC1091
 source "$PROJECT_ROOT/lib/common.sh"
 
-# Function to detect system drive
-detect_system_drive() {
-    # Get the root filesystem mount point
-    local root_device
-    if ! root_device=$(findmnt -n -o SOURCE / 2>/dev/null); then
-        # Fallback: try to get root device from /proc/mounts
-        root_device=$(awk '$2 == "/" {print $1; exit}' /proc/mounts 2>/dev/null || true)
-        if [[ -z "$root_device" ]]; then
-            log "ERROR" "Cannot determine root filesystem device"
-            return 1
-        fi
-    fi
-    
-    if [[ -z "$root_device" ]]; then
-        log "ERROR" "Cannot determine root filesystem device"
-        return 1
-    fi
-    
-    # If it's a partition, get the parent disk
-    if [[ "$root_device" =~ [0-9]$ ]]; then
-        # Remove partition number to get disk
-        root_device="${root_device%[0-9]*}"
-    fi
-    
-    # If it's an md device, resolve to underlying drives
-    if [[ "$root_device" =~ ^/dev/md ]]; then
-        local md_name
-        md_name=$(basename "$root_device")
-        log "INFO" "System is on RAID device: $md_name"
-        echo "$md_name"
-        return 0
-    fi
-    
-    basename "$root_device"
-}
-
-# Function to get all RAID arrays
+# Function to get all RAID arrays using multiple methods for maximum reliability
 get_all_raid_arrays() {
     local arrays=()
+    local temp_arrays=()
     
-    if [[ ! -f /proc/mdstat ]]; then
-        return 0
+    # Method 1: Use lsblk to find md devices - most reliable
+    if command -v lsblk >/dev/null 2>&1; then
+        log "DEBUG" "Scanning for RAID arrays using lsblk..."
+        while IFS= read -r line; do
+            if [[ -n "$line" ]]; then
+                local device
+                local type
+                device=$(echo "$line" | awk '{print $1}')
+                type=$(echo "$line" | awk '{print $2}')
+                if [[ "$device" =~ ^md[0-9]+$ ]] && [[ "$type" =~ raid ]]; then
+                    temp_arrays+=("$device")
+                fi
+            fi
+        done < <(lsblk -no NAME,TYPE 2>/dev/null | grep -E 'md[0-9]+.*raid' || true)
     fi
     
-    # Simple read without timeout complications
-    local mdstat_content
-    if mdstat_content=$(cat /proc/mdstat 2>/dev/null); then
+    # Method 2: Check /proc/mdstat as fallback
+    if [[ -f /proc/mdstat ]]; then
+        log "DEBUG" "Scanning for RAID arrays using /proc/mdstat..."
         while IFS= read -r line; do
             if [[ "$line" =~ ^(md[0-9]+) ]]; then
-                arrays+=("${BASH_REMATCH[1]}")
+                temp_arrays+=("${BASH_REMATCH[1]}")
             fi
-        done <<< "$mdstat_content"
+        done < <(grep -E '^md[0-9]+' /proc/mdstat 2>/dev/null || true)
     fi
     
-    printf '%s\n' "${arrays[@]}"
+    # Method 3: Check /dev for md devices
+    log "DEBUG" "Scanning for RAID arrays in /dev..."
+    for device in /dev/md[0-9]*; do
+        if [[ -b "$device" ]]; then
+            local md_name
+            md_name=$(basename "$device")
+            temp_arrays+=("$md_name")
+        fi
+    done
+    
+    # Remove duplicates and verify devices actually exist
+    for array in "${temp_arrays[@]}"; do
+        if [[ -n "$array" ]] && [[ -b "/dev/$array" ]]; then
+            # Check if we already have this array
+            local found=false
+            for existing in "${arrays[@]}"; do
+                if [[ "$existing" == "$array" ]]; then
+                    found=true
+                    break
+                fi
+            done
+            if [[ "$found" == "false" ]]; then
+                arrays+=("$array")
+            fi
+        fi
+    done
+    
+    # Sort and output
+    if [[ ${#arrays[@]} -gt 0 ]]; then
+        printf '%s\n' "${arrays[@]}" | sort -V
+    fi
 }
 
-# Function to get drives in a RAID array
+# Function to get drives in a RAID array using mdadm
 get_raid_members() {
     local md_device="$1"
     local members=()
     
-    if [[ ! -f /proc/mdstat ]]; then
-        return 0
+    # Use mdadm to get detailed information
+    if [[ -b "/dev/$md_device" ]] && command -v mdadm >/dev/null 2>&1; then
+        # Get member devices using mdadm --detail
+        while IFS= read -r line; do
+            # Look for lines with device paths like /dev/sda1, /dev/nvme0n1p1, etc.
+            if [[ "$line" =~ /dev/([a-zA-Z0-9]+) ]]; then
+                local device="${BASH_REMATCH[1]}"
+                # Skip if it looks like the md device itself
+                if [[ ! "$device" =~ ^md[0-9]+$ ]]; then
+                    members+=("$device")
+                fi
+            fi
+        done < <(mdadm --detail "/dev/$md_device" 2>/dev/null | grep -E '^\s+[0-9]+\s+[0-9]+\s+[0-9]+\s+[0-9]+\s+active' || true)
     fi
     
-    # Simple read without timeout complications
-    local mdstat_content
-    if mdstat_content=$(cat /proc/mdstat 2>/dev/null); then
-        # Find the line for this md device and extract member drives
+    # Fallback: try to extract from /proc/mdstat
+    if [[ ${#members[@]} -eq 0 ]] && [[ -f /proc/mdstat ]]; then
         while IFS= read -r line; do
             if [[ "$line" =~ ^$md_device ]]; then
                 # Extract drive names from the line
                 # Format: md0 : active raid1 sdb1[1] sda1[0]
-                if [[ "$line" =~ raid1.*([a-z]+[0-9]*\[[0-9]+\].*) ]]; then
-                    local drives_part="${BASH_REMATCH[1]}"
-                    # Extract individual drives
-                    while [[ "$drives_part" =~ ([a-z]+[0-9]*)\[[0-9]+\] ]]; do
-                        members+=("${BASH_REMATCH[1]}")
-                        drives_part="${drives_part/${BASH_REMATCH[0]}/}"
-                    done
-                fi
+                while [[ "$line" =~ ([a-zA-Z0-9]+)\[[0-9]+\] ]]; do
+                    local device="${BASH_REMATCH[1]}"
+                    if [[ ! "$device" =~ ^md[0-9]+$ ]]; then
+                        members+=("$device")
+                    fi
+                    line="${line/${BASH_REMATCH[0]}/}"
+                done
                 break
             fi
-        done <<< "$mdstat_content"
+        done < <(grep -E "^$md_device" /proc/mdstat 2>/dev/null || true)
     fi
     
-    printf '%s\n' "${members[@]}"
+    # Remove duplicates and output
+    if [[ ${#members[@]} -gt 0 ]]; then
+        printf '%s\n' "${members[@]}" | sort -u
+    fi
 }
 
 # Function to check if array is system array
 is_system_array() {
     local md_device="$1"
-    local system_drive="$2"
-    
-    # If system drive is an md device, check if it matches
-    if [[ "$system_drive" == "$md_device" ]]; then
-        return 0
-    fi
     
     # Check if the array is mounted on system paths
     local mount_points
     mount_points=$(findmnt -n -o TARGET -S "/dev/$md_device" 2>/dev/null || true)
     
     if [[ -n "$mount_points" ]]; then
-        while read -r mount_point; do
-            case "$mount_point" in
-                "/" | "/boot" | "/var" | "/usr" | "/home" | "/opt" | "/tmp")
-                    return 0
-                    ;;
-            esac
+        while IFS= read -r mount_point; do
+            if [[ -n "$mount_point" ]]; then
+                case "$mount_point" in
+                    "/" | "/boot" | "/var" | "/usr" | "/home" | "/opt" | "/tmp")
+                        return 0
+                        ;;
+                esac
+            fi
         done <<< "$mount_points"
     fi
     
-    # Check if any member drives contain system partitions
-    local members
-    mapfile -t members < <(get_raid_members "$md_device")
-    
-    for member in "${members[@]}"; do
-        if [[ -z "$member" ]]; then
-            continue
-        fi
-        
-        # Get the parent disk
-        local parent_disk="/dev/$member"
-        if [[ "$member" =~ [0-9]$ ]]; then
-            parent_disk="${parent_disk%[0-9]*}"
-        fi
-        
-        # Check if this disk has system mounts
-        local disk_mounts
-        disk_mounts=$(lsblk "$parent_disk" -no MOUNTPOINT 2>/dev/null | grep -E "^(/|/boot|/var|/usr|/home)$" || true)
-        if [[ -n "$disk_mounts" ]]; then
-            return 0
-        fi
-    done
+    # Check if root filesystem is on this array
+    local root_device
+    root_device=$(findmnt -n -o SOURCE / 2>/dev/null || true)
+    if [[ "$root_device" == "/dev/$md_device" ]] || [[ "$root_device" =~ ^/dev/${md_device}p?[0-9]+$ ]]; then
+        return 0
+    fi
     
     return 1
 }
@@ -161,16 +159,21 @@ remove_raid_array() {
     
     log "INFO" "Removing RAID array: $md_device"
     
+    # Check if device exists
+    if [[ ! -b "/dev/$md_device" ]]; then
+        log "WARNING" "Device /dev/$md_device does not exist, skipping"
+        return 0
+    fi
+    
     # Get array details before removal
     local members
     mapfile -t members < <(get_raid_members "$md_device")
     
     if [[ ${#members[@]} -eq 0 ]]; then
-        log "WARNING" "No members found for array $md_device"
-        return 0
+        log "WARNING" "No members found for array $md_device, attempting removal anyway"
+    else
+        log "INFO" "Array $md_device contains drives: ${members[*]}"
     fi
-    
-    log "INFO" "Array $md_device contains drives: ${members[*]}"
     
     # Check if array is mounted and unmount if needed
     local mount_points
@@ -178,13 +181,13 @@ remove_raid_array() {
     
     if [[ -n "$mount_points" ]]; then
         log "INFO" "Unmounting filesystems on $md_device..."
-        while read -r mount_point; do
+        while IFS= read -r mount_point; do
             if [[ -n "$mount_point" ]]; then
                 log "INFO" "Unmounting: $mount_point"
                 if ! umount "$mount_point" 2>/dev/null; then
                     if [[ "$force" == "true" ]]; then
                         log "WARNING" "Force unmounting: $mount_point"
-                        umount -f "$mount_point" || log "ERROR" "Failed to force unmount $mount_point"
+                        umount -f "$mount_point" 2>/dev/null || umount -l "$mount_point" 2>/dev/null || log "ERROR" "Failed to force unmount $mount_point"
                     else
                         log "ERROR" "Failed to unmount $mount_point. Use --force to force unmount."
                         return 1
@@ -196,28 +199,37 @@ remove_raid_array() {
     
     # Remove from Proxmox storage configuration if it exists
     local storage_name="data-$md_device"
-    if pvesm status "$storage_name" >/dev/null 2>&1; then
+    if command -v pvesm >/dev/null 2>&1 && pvesm status "$storage_name" >/dev/null 2>&1; then
         log "INFO" "Removing Proxmox storage: $storage_name"
-        pvesm remove "$storage_name" || log "WARNING" "Failed to remove Proxmox storage $storage_name"
+        pvesm remove "$storage_name" 2>/dev/null || log "WARNING" "Failed to remove Proxmox storage $storage_name"
     fi
     
     # Stop the array
     log "INFO" "Stopping RAID array: $md_device"
-    if ! mdadm --stop "/dev/$md_device"; then
-        log "ERROR" "Failed to stop RAID array $md_device"
-        return 1
+    if ! mdadm --stop "/dev/$md_device" 2>/dev/null; then
+        log "WARNING" "Failed to stop RAID array $md_device normally, trying force stop"
+        # Try force stop
+        if ! mdadm --stop --force "/dev/$md_device" 2>/dev/null; then
+            log "ERROR" "Failed to stop RAID array $md_device even with force"
+            return 1
+        fi
     fi
     
     # Zero superblocks on member drives
-    log "INFO" "Clearing RAID superblocks from member drives..."
-    for member in "${members[@]}"; do
-        if [[ -n "$member" ]] && [[ -b "/dev/$member" ]]; then
-            log "INFO" "Clearing superblock from /dev/$member"
-            mdadm --zero-superblock "/dev/$member" || log "WARNING" "Failed to clear superblock from /dev/$member"
-        fi
-    done
+    if [[ ${#members[@]} -gt 0 ]]; then
+        log "INFO" "Clearing RAID superblocks from member drives..."
+        for member in "${members[@]}"; do
+            if [[ -n "$member" ]] && [[ -b "/dev/$member" ]]; then
+                log "INFO" "Clearing superblock from /dev/$member"
+                mdadm --zero-superblock "/dev/$member" 2>/dev/null || log "WARNING" "Failed to clear superblock from /dev/$member"
+            fi
+        done
+    else
+        log "WARNING" "No member drives found to clear superblocks from"
+    fi
     
     log "INFO" "Successfully removed RAID array: $md_device"
+    return 0
 }
 
 # Function to show current RAID status
@@ -225,72 +237,55 @@ show_raid_status() {
     log "INFO" "Current RAID status:"
     echo "======================"
     
-    if [[ ! -f /proc/mdstat ]]; then
-        log "INFO" "No RAID arrays found (no /proc/mdstat)"
+    # Get arrays using the reliable method
+    local arrays
+    mapfile -t arrays < <(get_all_raid_arrays)
+    
+    if [[ ${#arrays[@]} -eq 0 ]]; then
+        log "INFO" "No RAID arrays found"
+        
+        # Show /proc/mdstat for reference if it exists
+        if [[ -f /proc/mdstat ]]; then
+            log "INFO" "Contents of /proc/mdstat:"
+            cat /proc/mdstat 2>/dev/null || log "WARNING" "Could not read /proc/mdstat"
+        fi
         return 0
     fi
     
-    # Simple check for content without hanging
-    local mdstat_content=""
-    if mdstat_content=$(cat /proc/mdstat 2>/dev/null); then
-        if [[ -z "$mdstat_content" ]]; then
-            log "INFO" "No RAID arrays found (/proc/mdstat is empty)"
-            return 0
+    # Process each array
+    for array in "${arrays[@]}"; do
+        if [[ -z "$array" ]]; then
+            continue
         fi
         
-        # Check if there are any md devices
-        if ! echo "$mdstat_content" | grep -q "^md[0-9]"; then
-            log "INFO" "No RAID arrays found"
-            echo "$mdstat_content"
-            return 0
+        local members
+        mapfile -t members < <(get_raid_members "$array")
+        
+        local status="DATA"
+        if is_system_array "$array"; then
+            status="SYSTEM"
         fi
         
-        # Process arrays
-        local arrays
-        mapfile -t arrays < <(echo "$mdstat_content" | grep "^md[0-9]" | cut -d' ' -f1)
+        log "INFO" "  $array [$status]: ${members[*]:-No members found}"
         
-        if [[ ${#arrays[@]} -eq 0 ]]; then
-            log "INFO" "No RAID arrays found"
-            echo "$mdstat_content"
-            return 0
+        # Show mount points if any
+        local mount_points
+        mount_points=$(findmnt -n -o TARGET -S "/dev/$array" 2>/dev/null || true)
+        if [[ -n "$mount_points" ]]; then
+            while IFS= read -r mount_point; do
+                if [[ -n "$mount_point" ]]; then
+                    log "INFO" "    └─ Mounted at: $mount_point"
+                fi
+            done <<< "$mount_points"
         fi
-        
-        local system_drive
-        system_drive=$(detect_system_drive)
-        
-        for array in "${arrays[@]}"; do
-            if [[ -z "$array" ]]; then
-                continue
-            fi
-            
-            local members
-            mapfile -t members < <(get_raid_members "$array")
-            
-            local status="DATA"
-            if is_system_array "$array" "$system_drive"; then
-                status="SYSTEM"
-            fi
-            
-            log "INFO" "  $array [$status]: ${members[*]}"
-            
-            # Show mount points if any
-            local mount_points
-            mount_points=$(findmnt -n -o TARGET -S "/dev/$array" 2>/dev/null || true)
-            if [[ -n "$mount_points" ]]; then
-                while read -r mount_point; do
-                    if [[ -n "$mount_point" ]]; then
-                        log "INFO" "    └─ Mounted at: $mount_point"
-                    fi
-                done <<< "$mount_points"
-            fi
-        done
-        
-        echo
-        log "INFO" "Full /proc/mdstat:"
-        echo "$mdstat_content"
+    done
+    
+    echo
+    log "INFO" "Full /proc/mdstat output:"
+    if [[ -f /proc/mdstat ]]; then
+        cat /proc/mdstat 2>/dev/null || log "WARNING" "Could not read /proc/mdstat"
     else
-        log "ERROR" "Cannot read /proc/mdstat"
-        return 1
+        log "INFO" "No /proc/mdstat file found"
     fi
 }
 
@@ -308,10 +303,6 @@ remove_all_mirrors() {
         return 0
     fi
     
-    local system_drive
-    system_drive=$(detect_system_drive)
-    log "INFO" "System drive detected: $system_drive"
-    
     local system_arrays=()
     local data_arrays=()
     
@@ -321,7 +312,7 @@ remove_all_mirrors() {
             continue
         fi
         
-        if is_system_array "$array" "$system_drive"; then
+        if is_system_array "$array"; then
             system_arrays+=("$array")
         else
             data_arrays+=("$array")
@@ -335,7 +326,7 @@ remove_all_mirrors() {
         for array in "${system_arrays[@]}"; do
             local members
             mapfile -t members < <(get_raid_members "$array")
-            log "INFO" "  $array: ${members[*]} [SYSTEM]"
+            log "INFO" "  $array: ${members[*]:-No members} [SYSTEM]"
         done
     fi
     
@@ -344,7 +335,7 @@ remove_all_mirrors() {
         for array in "${data_arrays[@]}"; do
             local members
             mapfile -t members < <(get_raid_members "$array")
-            log "INFO" "  $array: ${members[*]} [DATA]"
+            log "INFO" "  $array: ${members[*]:-No members} [DATA]"
         done
     fi
     
@@ -371,113 +362,36 @@ remove_all_mirrors() {
     
     # Remove ALL arrays
     local success_count=0
+    local failed_arrays=()
+    
     for array in "${arrays[@]}"; do
+        if [[ -z "$array" ]]; then
+            continue
+        fi
+        
         if remove_raid_array "$array" "$force"; then
             ((success_count++))
         else
+            failed_arrays+=("$array")
             log "ERROR" "Failed to remove array: $array"
         fi
     done
     
     log "INFO" "Successfully removed $success_count of ${#arrays[@]} RAID arrays"
     
+    if [[ ${#failed_arrays[@]} -gt 0 ]]; then
+        log "WARNING" "Failed to remove arrays: ${failed_arrays[*]}"
+    fi
+    
     if [[ $success_count -gt 0 ]]; then
         log "INFO" "Updating mdadm configuration..."
         # Clear the mdadm.conf since we removed everything
-        echo "# All RAID arrays have been removed" > /etc/mdadm/mdadm.conf || log "WARNING" "Failed to update mdadm.conf"
+        echo "# All RAID arrays have been removed on $(date)" > /etc/mdadm/mdadm.conf 2>/dev/null || log "WARNING" "Failed to update mdadm.conf"
         
         log "INFO" "Updating initramfs..."
-        update-initramfs -u || log "WARNING" "Failed to update initramfs"
+        update-initramfs -u 2>/dev/null || log "WARNING" "Failed to update initramfs"
         
         log "WARNING" "⚠️  System reboot may be required to boot from individual drives"
-    fi
-}
-
-# Function to remove all non-system RAID mirrors
-remove_all_non_system_mirrors() {
-    local force="${1:-false}"
-    
-    log "INFO" "Scanning for RAID arrays to remove..."
-    
-    local arrays
-    mapfile -t arrays < <(get_all_raid_arrays)
-    
-    if [[ ${#arrays[@]} -eq 0 ]]; then
-        log "INFO" "No RAID arrays found"
-        return 0
-    fi
-    
-    local system_drive
-    system_drive=$(detect_system_drive)
-    log "INFO" "System drive detected: $system_drive"
-    
-    local arrays_to_remove=()
-    local system_arrays=()
-    
-    # Categorize arrays
-    for array in "${arrays[@]}"; do
-        if [[ -z "$array" ]]; then
-            continue
-        fi
-        
-        if is_system_array "$array" "$system_drive"; then
-            system_arrays+=("$array")
-        else
-            arrays_to_remove+=("$array")
-        fi
-    done
-    
-    # Show what will be preserved
-    if [[ ${#system_arrays[@]} -gt 0 ]]; then
-        log "INFO" "System arrays (will be preserved):"
-        for array in "${system_arrays[@]}"; do
-            local members
-            mapfile -t members < <(get_raid_members "$array")
-            log "INFO" "  $array: ${members[*]}"
-        done
-    fi
-    
-    # Show what will be removed
-    if [[ ${#arrays_to_remove[@]} -eq 0 ]]; then
-        log "INFO" "No non-system RAID arrays found to remove"
-        return 0
-    fi
-    
-    log "INFO" "Non-system arrays (will be removed):"
-    for array in "${arrays_to_remove[@]}"; do
-        local members
-        mapfile -t members < <(get_raid_members "$array")
-        log "INFO" "  $array: ${members[*]}"
-    done
-    
-    # Confirm removal unless force flag is set
-    if [[ "$force" != "true" ]]; then
-        echo
-        read -p "⚠️  This will permanently remove ${#arrays_to_remove[@]} RAID array(s) and all data on them. Continue? (y/N): " -r
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            log "INFO" "Operation cancelled by user"
-            return 0
-        fi
-    fi
-    
-    # Remove arrays
-    local success_count=0
-    for array in "${arrays_to_remove[@]}"; do
-        if remove_raid_array "$array" "$force"; then
-            ((success_count++))
-        else
-            log "ERROR" "Failed to remove array: $array"
-        fi
-    done
-    
-    log "INFO" "Successfully removed $success_count of ${#arrays_to_remove[@]} RAID arrays"
-    
-    if [[ $success_count -gt 0 ]]; then
-        log "INFO" "Updating mdadm configuration..."
-        mdadm --detail --scan > /etc/mdadm/mdadm.conf || log "WARNING" "Failed to update mdadm.conf"
-        
-        log "INFO" "Updating initramfs..."
-        update-initramfs -u || log "WARNING" "Failed to update initramfs"
     fi
 }
 
