@@ -27,6 +27,7 @@ Automated setup for Hetzner Proxmox server with Caddy reverse proxy and HTTPS.
 
 COMMANDS:
     (no command)        Show this help and available commands
+    --setup-system      Optimize host system for Proxmox and ensure /data partition exists
     --format-drives     Format non-system drives interactively (safe, asks for confirmation)
     --setup-mirrors     Scan drives and configure optimal RAID mirror arrays
     --remove-mirrors    Remove ALL RAID mirror configurations including system mirrors (preserves data on drives)
@@ -44,6 +45,7 @@ OPTIONS:
 EXAMPLES:
     $0                          # Show available commands (safe - shows help only)
     $0 --check-mac              # Verify MAC address configuration (recommended first step)
+    $0 --setup-system           # Optimize host system for Proxmox and setup /data partition
     $0 --format-drives          # Format non-system drives interactively
     $0 --setup-mirrors          # Scan drives and configure optimal RAID mirror arrays
     $0 --remove-mirrors         # Remove ALL RAID mirror configurations including system mirrors
@@ -90,6 +92,10 @@ parse_args() {
         case $1 in
             --caddy)
                 command="caddy"
+                shift
+                ;;
+            --setup-system)
+                command="setup-system"
                 shift
                 ;;
             --network)
@@ -144,7 +150,7 @@ parse_args() {
                 export LOG_LEVEL="DEBUG"
                 shift
                 ;;
-            --caddy|--network|--pfsense|--firewalladmin|--check-mac|--setup-mirrors|--remove-mirrors|--format-drives)
+            --caddy|--setup-system|--network|--pfsense|--firewalladmin|--check-mac|--setup-mirrors|--remove-mirrors|--format-drives)
                 # Already handled above
                 shift
                 ;;
@@ -173,6 +179,10 @@ validate_setup() {
     
     # Different validation based on command
     case "${COMMAND:-}" in
+        "setup-system")
+            # System setup validation
+            log "INFO" "System setup validation will be performed by setup-system.sh"
+            ;;
         "caddy")
             # Check if required environment variables are set for Caddy
             validate_env "DOMAIN" "EMAIL"
@@ -512,9 +522,35 @@ run_format_drives() {
 }
 
 
+# Run system setup and optimization
+run_setup_system() {
+    log "INFO" "Starting Proxmox system optimization and setup..."
+    log "INFO" "Logs are being written to: $LOG_FILE"
+    
+    # Run system setup script
+    run_script "scripts/setup-system.sh"
+    
+    log "INFO" "✅ System Setup Complete!"
+    log "INFO" "Host system has been optimized for Proxmox"
+    log "INFO" "Data partition has been configured (if space was available)"
+    log "INFO" ""
+    log "INFO" "Next Steps:"
+    log "INFO" "1. Reboot to ensure all optimizations are active"
+    log "INFO" "2. Format additional drives: $0 --format-drives"
+    log "INFO" "3. Setup RAID mirrors: $0 --setup-mirrors"
+    log "INFO" "4. Configure network: $0 --network"
+    log "INFO" "5. Install Caddy: $0 --caddy"
+    log "INFO" ""
+    log "INFO" "Logs are available at: $LOG_FILE"
+}
+
+
 # Main installation function
 main() {
     case "${COMMAND:-}" in
+        "setup-system")
+            run_setup_system
+            ;;
         "caddy")
             run_caddy_setup
             ;;
@@ -551,6 +587,7 @@ main() {
             echo
             log "INFO" "Available commands:"
             log "INFO" "  --check-mac      ⭐ START HERE - Verify MAC address configuration"
+            log "INFO" "  --setup-system   🚀 Optimize host system for Proxmox and setup /data partition"
             log "INFO" "  --format-drives  🧹 Format non-system drives interactively (safe)"
             log "INFO" "  --remove-mirrors 🧹 Remove ALL RAID mirror configurations including system (preserves data)"
             log "INFO" "  --setup-mirrors  🔧 Scan drives and configure optimal RAID mirror arrays"
@@ -565,10 +602,11 @@ main() {
             echo
             log "INFO" "Recommended first-time workflow:"
             log "INFO" "  1. $0 --check-mac     # Verify your configuration"
-            log "INFO" "  2. $0 --format-drives # (Optional) Format drives for clean state"
-            log "INFO" "  3. $0 --setup-mirrors # Configure RAID arrays"
-            log "INFO" "  4. $0 --network       # Configure network"
-            log "INFO" "  5. $0 --caddy         # Install Caddy"
+            log "INFO" "  2. $0 --setup-system  # Optimize system and setup /data partition"
+            log "INFO" "  3. $0 --format-drives # (Optional) Format drives for clean state"
+            log "INFO" "  4. $0 --setup-mirrors # Configure RAID arrays"
+            log "INFO" "  5. $0 --network       # Configure network"
+            log "INFO" "  6. $0 --caddy         # Install Caddy"
             echo
             log "INFO" "⚠️  NEVER run without specifying a command - this prevents accidental execution!"
             exit 0
