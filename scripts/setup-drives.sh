@@ -32,17 +32,40 @@ detect_drives() {
     fi
     
     log "INFO" "Found the following drives:"
-    echo "$drives" | while read -r line; do
+    
+    # Use process substitution to avoid subshell and preserve array assignments
+    while IFS= read -r line; do
         local drive_name size mountpoint
         read -r drive_name size _ mountpoint <<< "$line"
         
-        # Skip the system drive (usually mounted at /)
+        # Skip the system drive - check multiple conditions
+        local is_system_drive=false
+        
+        # Check if mounted at root
         if [[ -n "$mountpoint" ]] && [[ "$mountpoint" == "/" ]]; then
+            is_system_drive=true
+        fi
+        
+        # Check if any partition of this drive is mounted at system locations
+        if ! $is_system_drive; then
+            if lsblk "$drive_name" -no MOUNTPOINT | grep -qE "^(/|/boot|/var|/usr|/home)$" 2>/dev/null; then
+                is_system_drive=true
+            fi
+        fi
+        
+        # Check if this drive contains Proxmox installation
+        if ! $is_system_drive; then
+            if lsblk "$drive_name" -no LABEL 2>/dev/null | grep -qE "(proxmox|pve)" 2>/dev/null; then
+                is_system_drive=true
+            fi
+        fi
+        
+        if $is_system_drive; then
             log "INFO" "  $drive_name ($size) - SYSTEM DRIVE (skipping)"
             continue
         fi
         
-        # Check if drive has any mounted partitions
+        # Check if drive has any mounted partitions (but not system ones)
         local has_mounted_partitions=false
         if lsblk "$drive_name" -no MOUNTPOINT | grep -q "^/" 2>/dev/null; then
             has_mounted_partitions=true
@@ -55,14 +78,21 @@ detect_drives() {
             AVAILABLE_DRIVES+=("$drive_name")
             DRIVE_SIZES+=("$size")
         fi
-    done
+    done < <(echo "$drives")
     
     if [[ ${#AVAILABLE_DRIVES[@]} -eq 0 ]]; then
         log "ERROR" "No available drives found for configuration"
+        log "DEBUG" "Debug: All detected drives were filtered out"
+        log "DEBUG" "This usually means all drives contain mounted partitions or are system drives"
         exit 1
     fi
     
     log "INFO" "Found ${#AVAILABLE_DRIVES[@]} available drives for configuration"
+    
+    # Debug: Show what drives were selected
+    for i in "${!AVAILABLE_DRIVES[@]}"; do
+        log "DEBUG" "Available drive $((i+1)): ${AVAILABLE_DRIVES[i]} (${DRIVE_SIZES[i]})"
+    done
 }
 
 # Function to group drives by size for mirroring
@@ -298,6 +328,24 @@ display_final_status() {
     log "INFO" "You can now use the configured storage in Proxmox VE"
 }
 
+# Function to show detailed drive information for debugging
+show_drive_details() {
+    log "INFO" "=== DETAILED DRIVE INFORMATION ==="
+    
+    log "INFO" "All block devices:"
+    lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,LABEL
+    echo
+    
+    log "INFO" "Drive partition details:"
+    for drive in /dev/nvme*n1 /dev/sd*; do
+        if [[ -b "$drive" ]]; then
+            log "INFO" "Drive: $drive"
+            lsblk "$drive" -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,LABEL 2>/dev/null || log "WARN" "Could not read $drive"
+            echo
+        fi
+    done
+}
+
 # Main function
 main() {
     log "INFO" "Starting Hetzner Proxmox drive configuration..."
@@ -306,6 +354,11 @@ main() {
     if [[ $EUID -ne 0 ]]; then
         log "ERROR" "This script must be run as root"
         exit 1
+    fi
+    
+    # Show detailed drive information if verbose logging is enabled
+    if [[ "${LOG_LEVEL:-}" == "DEBUG" ]]; then
+        show_drive_details
     fi
     
     # Detect available drives
