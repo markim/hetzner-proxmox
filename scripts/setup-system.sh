@@ -493,7 +493,15 @@ create_lvm_data_volume() {
             # Ask if user wants to extend it
             echo
             log "INFO" "Do you want to extend the existing /data logical volume to use all available space?"
-            read -p "Extend /data logical volume? (y/N): " -r
+            
+            # Check if we're running interactively
+            if [[ -t 0 ]]; then
+                read -p "Extend /data logical volume? (y/N): " -r
+            else
+                log "INFO" "Running non-interactively, auto-extending /data logical volume..."
+                REPLY="y"
+            fi
+            
             if [[ $REPLY =~ ^[Yy]$ ]]; then
                 log "INFO" "Extending logical volume to use all free space..."
                 if lvextend -l +100%FREE "$vg_name/data" 2>/dev/null; then
@@ -815,7 +823,14 @@ setup_data_partition() {
         log "INFO" "Purpose: Container data storage (/data)"
         log "INFO" "Type: LVM Logical Volume"
         echo
-        read -p "Do you want to create the /data logical volume? (y/N): " -r
+        
+        # Check if we're running interactively
+        if [[ -t 0 ]]; then
+            read -p "Do you want to create the /data logical volume? (y/N): " -r
+        else
+            log "INFO" "Running non-interactively, auto-creating /data logical volume..."
+            REPLY="y"
+        fi
     else
         log "INFO" "Detected physical partition setup"
         
@@ -827,7 +842,14 @@ setup_data_partition() {
         log "INFO" "Purpose: Container data storage (/data)"
         log "INFO" "Type: Physical Partition"
         echo
-        read -p "Do you want to create the /data partition? (y/N): " -r
+        
+        # Check if we're running interactively
+        if [[ -t 0 ]]; then
+            read -p "Do you want to create the /data partition? (y/N): " -r
+        else
+            log "INFO" "Running non-interactively, auto-creating /data partition..."
+            REPLY="y"
+        fi
     fi
     
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
