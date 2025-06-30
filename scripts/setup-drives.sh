@@ -226,14 +226,31 @@ create_raid_mirrors() {
                     
                     # Wait for array to be ready
                     log "INFO" "Waiting for RAID array to initialize..."
-                    mdadm --wait "$md_device"
+                    if ! mdadm --wait "$md_device"; then
+                        log "WARN" "mdadm --wait failed, but array may still be functional. Continuing..."
+                    fi
+                    
+                    # Give it a moment to settle
+                    sleep 2
+                    
+                    # Check if the array is actually available
+                    if [[ ! -b "$md_device" ]]; then
+                        log "ERROR" "RAID device $md_device is not available"
+                        continue
+                    fi
                     
                     # Create filesystem
                     log "INFO" "Creating ext4 filesystem on $md_device..."
-                    mkfs.ext4 -F "$md_device"
+                    if ! mkfs.ext4 -F "$md_device"; then
+                        log "ERROR" "Failed to create filesystem on $md_device"
+                        continue
+                    fi
                     
                     # Add to Proxmox storage
-                    add_to_proxmox_storage "$md_device" "raid-mirror-$mirror_index"
+                    if ! add_to_proxmox_storage "$md_device" "raid-mirror-$mirror_index"; then
+                        log "ERROR" "Failed to add RAID array to Proxmox storage"
+                        # Continue with next mirror instead of failing completely
+                    fi
                 else
                     log "ERROR" "Failed to create RAID array $md_device"
                 fi
@@ -261,10 +278,16 @@ create_raid_mirrors() {
             
             # Create filesystem directly on drive
             log "INFO" "Creating ext4 filesystem on $drive..."
-            mkfs.ext4 -F "$drive"
+            if ! mkfs.ext4 -F "$drive"; then
+                log "ERROR" "Failed to create filesystem on $drive"
+                continue
+            fi
             
             # Add to Proxmox storage
-            add_to_proxmox_storage "$drive" "single-drive-$mirror_index"
+            if ! add_to_proxmox_storage "$drive" "single-drive-$mirror_index"; then
+                log "ERROR" "Failed to add single drive to Proxmox storage"
+                # Continue with next drive instead of failing completely
+            fi
             
             mirror_index=$((mirror_index + 1))
         fi
@@ -299,13 +322,19 @@ add_to_proxmox_storage() {
     
     # Mount the filesystem
     if ! mountpoint -q "$mount_point"; then
-        mount "$mount_point"
+        if ! mount "$mount_point"; then
+            log "ERROR" "Failed to mount $device at $mount_point"
+            return 1
+        fi
         log "INFO" "Mounted $device at $mount_point"
     fi
     
     # Add to Proxmox storage configuration
     if ! pvesm status -storage "$storage_name" &>/dev/null; then
-        pvesm add dir "$storage_name" --path "$mount_point" --content "images,vztmpl,iso,snippets,backup"
+        if ! pvesm add dir "$storage_name" --path "$mount_point" --content "images,vztmpl,iso,snippets,backup"; then
+            log "ERROR" "Failed to add storage '$storage_name' to Proxmox"
+            return 1
+        fi
         log "INFO" "Added storage '$storage_name' to Proxmox"
     else
         log "INFO" "Storage '$storage_name' already exists in Proxmox"
