@@ -24,6 +24,9 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 # shellcheck disable=SC1091
 source "$PROJECT_ROOT/lib/common.sh"
 
+# Global variable for data backup directory
+DATA_BACKUP_DIR=""
+
 # Function to optimize system for Proxmox
 optimize_system() {
     log "INFO" "Optimizing system for Proxmox performance..."
@@ -262,6 +265,21 @@ detect_system_drive() {
 get_system_drive_free_space() {
     local drive="$1"
     
+    log "DEBUG" "Checking free space on drive: $drive"
+    
+    # First check if this drive is part of an LVM setup
+    local lvm_free_space
+    lvm_free_space=$(get_lvm_free_space "$drive")
+    
+    if [[ "$lvm_free_space" -gt 0 ]]; then
+        log "DEBUG" "Found LVM free space: $lvm_free_space bytes"
+        echo "$lvm_free_space"
+        return 0
+    fi
+    
+    # Fall back to regular partition-based calculation
+    log "DEBUG" "Checking regular partition free space"
+    
     # Get total size of drive
     local total_size_bytes
     total_size_bytes=$(lsblk -no SIZE -b "/dev/$drive" 2>/dev/null | head -1 || echo "0")
@@ -291,16 +309,211 @@ get_system_drive_free_space() {
     fi
 }
 
-# Function to create /data partition
-create_data_partition() {
+# Function to check LVM free space
+get_lvm_free_space() {
+    local drive="$1"
+    
+    # Check if this drive/partition has LVM physical volumes
+    if ! command -v pvs >/dev/null 2>&1; then
+        echo "0"
+        return 0
+    fi
+    
+    # Check if the drive itself or any of its partitions are PVs
+    local pv_devices=()
+    
+    # Check the drive itself
+    if pvs "/dev/$drive" >/dev/null 2>&1; then
+        pv_devices+=("/dev/$drive")
+    fi
+    
+    # Check all partitions of the drive
+    while IFS= read -r partition; do
+        if [[ -n "$partition" && -b "/dev/$partition" ]]; then
+            if pvs "/dev/$partition" >/dev/null 2>&1; then
+                pv_devices+=("/dev/$partition")
+            fi
+        fi
+    done < <(lsblk -no NAME "/dev/$drive" 2>/dev/null | tail -n +2 | grep -E "^${drive}[0-9p]+" | sed 's/^[[:space:]]*//')
+    
+    if [[ ${#pv_devices[@]} -eq 0 ]]; then
+        echo "0"
+        return 0
+    fi
+    
+    # Get the volume group(s) for these physical volumes and sum free space
+    local total_free_bytes=0
+    local processed_vgs=()
+    
+    for pv_device in "${pv_devices[@]}"; do
+        local vg_name
+        vg_name=$(pvs --noheadings -o vg_name "$pv_device" 2>/dev/null | tr -d ' ' || true)
+        
+        if [[ -n "$vg_name" ]]; then
+            # Check if we've already processed this VG (avoid double counting)
+            local already_processed=false
+            for processed_vg in "${processed_vgs[@]}"; do
+                if [[ "$processed_vg" == "$vg_name" ]]; then
+                    already_processed=true
+                    break
+                fi
+            done
+            
+            if [[ "$already_processed" == "false" ]]; then
+                processed_vgs+=("$vg_name")
+                
+                # Get free space in this volume group (in bytes)
+                local vg_free_bytes
+                vg_free_bytes=$(vgs --noheadings -o vg_free --units B "$vg_name" 2>/dev/null | tr -d ' B' || echo "0")
+                
+                if [[ "$vg_free_bytes" =~ ^[0-9]+$ ]]; then
+                    total_free_bytes=$((total_free_bytes + vg_free_bytes))
+                fi
+            fi
+        fi
+    done
+    
+    # Only return if we have at least 10GB free
+    local min_space_bytes=$((10 * 1024 * 1024 * 1024))
+    if [[ $total_free_bytes -ge $min_space_bytes ]]; then
+        echo "$total_free_bytes"
+    else
+        echo "0"
+    fi
+}
+
+# Function to create /data storage (LVM logical volume or physical partition)
+create_data_storage() {
     local drive="$1"
     local free_space_bytes="$2"
-    
-    log "INFO" "Creating /data partition on /dev/$drive..."
     
     # Convert bytes to human readable
     local free_space_gb=$((free_space_bytes / 1024 / 1024 / 1024))
     log "INFO" "Available space: ${free_space_gb}GB"
+    
+    # Check if this is an LVM setup
+    local vg_name
+    vg_name=$(get_volume_group_for_drive "$drive")
+    
+    if [[ -n "$vg_name" ]]; then
+        log "INFO" "Creating LVM logical volume for /data in volume group: $vg_name"
+        create_lvm_data_volume "$vg_name" "$free_space_bytes"
+    else
+        log "INFO" "Creating physical partition for /data on /dev/$drive"
+        create_physical_data_partition "$drive" "$free_space_bytes"
+    fi
+}
+
+# Function to get volume group name for a drive
+get_volume_group_for_drive() {
+    local drive="$1"
+    
+    if ! command -v pvs >/dev/null 2>&1; then
+        echo ""
+        return 0
+    fi
+    
+    # Check if the drive itself is a PV
+    local vg_name
+    vg_name=$(pvs --noheadings -o vg_name "/dev/$drive" 2>/dev/null | tr -d ' ' || true)
+    if [[ -n "$vg_name" ]]; then
+        echo "$vg_name"
+        return 0
+    fi
+    
+    # Check all partitions of the drive
+    while IFS= read -r partition; do
+        if [[ -n "$partition" && -b "/dev/$partition" ]]; then
+            vg_name=$(pvs --noheadings -o vg_name "/dev/$partition" 2>/dev/null | tr -d ' ' || true)
+            if [[ -n "$vg_name" ]]; then
+                echo "$vg_name"
+                return 0
+            fi
+        fi
+    done < <(lsblk -no NAME "/dev/$drive" 2>/dev/null | tail -n +2 | grep -E "^${drive}[0-9p]+" | sed 's/^[[:space:]]*//')
+    
+    echo ""
+    return 0
+}
+
+# Function to create LVM logical volume for /data
+create_lvm_data_volume() {
+    local vg_name="$1"
+    local free_space_bytes="$2"
+    
+    # Check if data logical volume already exists
+    if lvs "$vg_name/data" >/dev/null 2>&1; then
+        log "INFO" "Logical volume 'data' already exists in volume group '$vg_name'"
+        local current_size
+        current_size=$(lvs --noheadings -o lv_size --units B "$vg_name/data" 2>/dev/null | tr -d ' B' || echo "0")
+        
+        if [[ "$current_size" =~ ^[0-9]+$ ]] && [[ $current_size -gt 0 ]]; then
+            log "INFO" "Current data LV size: $((current_size / 1024 / 1024 / 1024))GB"
+            
+            # Ask if user wants to extend it
+            echo
+            log "INFO" "Do you want to extend the existing /data logical volume to use all available space?"
+            read -p "Extend /data logical volume? (y/N): " -r
+            if [[ $REPLY =~ ^[Yy]$ ]]; then
+                log "INFO" "Extending logical volume to use all free space..."
+                if lvextend -l +100%FREE "$vg_name/data" 2>/dev/null; then
+                    log "INFO" "Resizing filesystem..."
+                    if resize2fs "/dev/$vg_name/data" 2>/dev/null; then
+                        log "INFO" "✅ Successfully extended /data logical volume"
+                        return 0
+                    else
+                        log "WARNING" "Extended LV but filesystem resize failed - you may need to run: resize2fs /dev/$vg_name/data"
+                        return 0
+                    fi
+                else
+                    log "ERROR" "Failed to extend logical volume"
+                    return 1
+                fi
+            else
+                log "INFO" "Keeping existing /data logical volume as-is"
+                return 0
+            fi
+        fi
+    fi
+    
+    # Create new logical volume using all free space
+    log "INFO" "Creating logical volume 'data' using all free space in volume group '$vg_name'..."
+    
+    # Backup existing /data contents if they exist
+    backup_and_prepare_data_directory
+    
+    if ! lvcreate -l 100%FREE -n data "$vg_name" 2>/dev/null; then
+        log "ERROR" "Failed to create logical volume 'data'"
+        restore_data_directory_backup
+        return 1
+    fi
+    
+    local lv_device="/dev/$vg_name/data"
+    
+    # Format the logical volume as ext4
+    log "INFO" "Formatting $lv_device as ext4..."
+    if ! mkfs.ext4 -F -L "data" "$lv_device" 2>/dev/null; then
+        log "ERROR" "Failed to format $lv_device"
+        lvremove -y "$vg_name/data" 2>/dev/null || true
+        restore_data_directory_backup
+        return 1
+    fi
+    
+    # Mount and configure the new volume
+    mount_and_configure_data_storage "$lv_device"
+    
+    # Restore backed up contents
+    restore_data_directory_backup
+    
+    return 0
+}
+
+# Function to create physical partition for /data
+create_physical_data_partition() {
+    local drive="$1"
+    local free_space_bytes="$2"
+    
+    log "INFO" "Creating physical partition for /data on /dev/$drive..."
     
     # Get the next available partition number
     local next_partition
@@ -308,10 +521,14 @@ create_data_partition() {
     existing_partitions=$(lsblk -no NAME "/dev/$drive" 2>/dev/null | grep -E "^${drive}[0-9]+" | wc -l || echo "0")
     next_partition=$((existing_partitions + 1))
     
+    # Backup existing /data contents if they exist
+    backup_and_prepare_data_directory
+    
     # Create the partition using all remaining space
     log "INFO" "Creating partition ${next_partition} for /data..."
     if ! parted "/dev/$drive" --script mkpart primary ext4 -- -${free_space_bytes}B -1 2>/dev/null; then
         log "ERROR" "Failed to create data partition on /dev/$drive"
+        restore_data_directory_backup
         return 1
     fi
     
@@ -338,6 +555,7 @@ create_data_partition() {
     
     if [[ ! -b "$partition_device" ]]; then
         log "ERROR" "Partition device $partition_device did not appear after partitioning"
+        restore_data_directory_backup
         return 1
     fi
     
@@ -345,32 +563,105 @@ create_data_partition() {
     log "INFO" "Formatting $partition_device as ext4..."
     if ! mkfs.ext4 -F -L "data" "$partition_device" 2>/dev/null; then
         log "ERROR" "Failed to format $partition_device"
+        restore_data_directory_backup
         return 1
     fi
     
-    # Create mount point
-    log "INFO" "Creating /data mount point..."
+    # Mount and configure the new partition
+    mount_and_configure_data_storage "$partition_device"
+    
+    # Restore backed up contents
+    restore_data_directory_backup
+    
+    return 0
+}
+
+# Function to backup existing /data directory contents
+backup_and_prepare_data_directory() {
+    DATA_BACKUP_DIR=""
+    
+    # Check if /data exists and has contents
+    if [[ -d /data ]] && [[ -n "$(ls -A /data 2>/dev/null)" ]]; then
+        log "INFO" "Backing up existing /data contents..."
+        
+        # Create temporary backup directory
+        DATA_BACKUP_DIR=$(mktemp -d "/tmp/data-backup-XXXXXX")
+        
+        # Copy contents to backup
+        if cp -a /data/* "$DATA_BACKUP_DIR/" 2>/dev/null; then
+            log "INFO" "Backed up /data contents to: $DATA_BACKUP_DIR"
+        else
+            log "WARNING" "Failed to backup some /data contents"
+        fi
+        
+        # Unmount /data if it's mounted
+        if findmnt /data >/dev/null 2>&1; then
+            log "INFO" "Unmounting existing /data..."
+            umount /data 2>/dev/null || umount -l /data 2>/dev/null || true
+        fi
+        
+        # Remove existing contents
+        rm -rf /data/* 2>/dev/null || true
+    else
+        log "INFO" "No existing /data contents to backup"
+    fi
+    
+    # Ensure /data directory exists
     mkdir -p /data
+}
+
+# Function to restore backed up /data directory contents
+restore_data_directory_backup() {
+    if [[ -n "${DATA_BACKUP_DIR:-}" ]] && [[ -d "$DATA_BACKUP_DIR" ]]; then
+        log "INFO" "Restoring backed up /data contents..."
+        
+        if [[ -d /data ]] && findmnt /data >/dev/null 2>&1; then
+            # /data is mounted, restore contents
+            if cp -a "$DATA_BACKUP_DIR"/* /data/ 2>/dev/null; then
+                log "INFO" "Successfully restored /data contents"
+            else
+                log "WARNING" "Failed to restore some /data contents from backup"
+                log "INFO" "Backup location: $DATA_BACKUP_DIR (not automatically deleted)"
+                return 1
+            fi
+        else
+            # /data is not properly mounted, restore to directory
+            log "WARNING" "/data is not mounted, restoring to directory"
+            if cp -a "$DATA_BACKUP_DIR"/* /data/ 2>/dev/null; then
+                log "INFO" "Restored contents to /data directory"
+            else
+                log "WARNING" "Failed to restore contents to /data directory"
+            fi
+        fi
+        
+        # Clean up backup
+        rm -rf "$DATA_BACKUP_DIR" 2>/dev/null || true
+        DATA_BACKUP_DIR=""
+    fi
+}
+
+# Function to mount and configure data storage
+mount_and_configure_data_storage() {
+    local device="$1"
     
     # Add to fstab
     log "INFO" "Adding /data to /etc/fstab..."
     local uuid
-    uuid=$(blkid -s UUID -o value "$partition_device" 2>/dev/null || true)
+    uuid=$(blkid -s UUID -o value "$device" 2>/dev/null || true)
+    
+    # Remove any existing /data entries
+    sed -i '\|/data|d' /etc/fstab
     
     if [[ -n "$uuid" ]]; then
-        # Remove any existing /data entries
-        sed -i '\|/data|d' /etc/fstab
-        # Add new entry
+        # Add new entry with UUID
         echo "UUID=$uuid /data ext4 defaults,noatime 0 2" >> /etc/fstab
     else
-        log "WARNING" "Could not get UUID for $partition_device, using device path"
-        # Remove any existing /data entries
-        sed -i '\|/data|d' /etc/fstab
-        # Add new entry
-        echo "$partition_device /data ext4 defaults,noatime 0 2" >> /etc/fstab
+        log "WARNING" "Could not get UUID for $device, using device path"
+        # Add new entry with device path
+        echo "$device /data ext4 defaults,noatime 0 2" >> /etc/fstab
     fi
     
-    # Mount the partition
+    # Mount the storage
     log "INFO" "Mounting /data..."
     if ! mount /data; then
         log "ERROR" "Failed to mount /data"
@@ -389,7 +680,7 @@ create_data_partition() {
     mkdir -p /data/templates
     mkdir -p /data/logs
     
-    log "INFO" "Successfully created and mounted /data partition"
+    log "INFO" "Successfully created and mounted /data storage"
     log "INFO" "Available space in /data: $(df -h /data | tail -1 | awk '{print $4}')"
     
     return 0
@@ -459,16 +750,38 @@ setup_data_partition() {
     local free_space_gb=$((free_space_bytes / 1024 / 1024 / 1024))
     log "INFO" "Found ${free_space_gb}GB of free space on /dev/$system_drive"
     
-    # Ask for confirmation before creating partition
-    echo
-    log "WARNING" "This will create a new partition on your system drive!"
-    log "INFO" "Drive: /dev/$system_drive"
-    log "INFO" "Size: ${free_space_gb}GB"
-    log "INFO" "Purpose: Container data storage (/data)"
-    echo
-    read -p "Do you want to create the /data partition? (y/N): " -r
+    # Determine if this is LVM or physical partition setup
+    local vg_name
+    vg_name=$(get_volume_group_for_drive "$system_drive")
+    
+    if [[ -n "$vg_name" ]]; then
+        log "INFO" "Detected LVM setup with volume group: $vg_name"
+        
+        # Ask for confirmation before creating LVM logical volume
+        echo
+        log "WARNING" "This will create a new logical volume in volume group '$vg_name'!"
+        log "INFO" "Volume Group: $vg_name"
+        log "INFO" "Available Space: ${free_space_gb}GB"
+        log "INFO" "Purpose: Container data storage (/data)"
+        log "INFO" "Type: LVM Logical Volume"
+        echo
+        read -p "Do you want to create the /data logical volume? (y/N): " -r
+    else
+        log "INFO" "Detected physical partition setup"
+        
+        # Ask for confirmation before creating partition
+        echo
+        log "WARNING" "This will create a new partition on your system drive!"
+        log "INFO" "Drive: /dev/$system_drive"
+        log "INFO" "Size: ${free_space_gb}GB"
+        log "INFO" "Purpose: Container data storage (/data)"
+        log "INFO" "Type: Physical Partition"
+        echo
+        read -p "Do you want to create the /data partition? (y/N): " -r
+    fi
+    
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        log "INFO" "Skipping /data partition creation"
+        log "INFO" "Skipping /data storage creation"
         
         # Create /data directory anyway
         mkdir -p /data
@@ -479,11 +792,11 @@ setup_data_partition() {
         return 0
     fi
     
-    # Create the partition
-    if create_data_partition "$system_drive" "$free_space_bytes"; then
-        log "INFO" "✅ /data partition created and mounted successfully"
+    # Create the storage (LVM logical volume or physical partition)
+    if create_data_storage "$system_drive" "$free_space_bytes"; then
+        log "INFO" "✅ /data storage created and mounted successfully"
     else
-        log "ERROR" "❌ Failed to create /data partition"
+        log "ERROR" "❌ Failed to create /data storage"
         return 1
     fi
     
@@ -554,11 +867,13 @@ OPTIMIZATIONS PERFORMED:
     - IRQ balancing
 
 DATA PARTITION:
-    - Detects system drive automatically
-    - Creates /data partition from free space (if available)
+    - Detects system drive automatically (LVM and physical partition support)
+    - Creates /data logical volume (LVM) or partition from free space
+    - Backs up and restores existing /data contents safely
     - Mounts /data and adds to /etc/fstab
     - Creates container data directories
     - Minimum 10GB free space required
+    - Can extend existing LVM volumes to use all available space
 
 EXAMPLES:
     $0                  # Run system optimization and setup /data partition
@@ -604,13 +919,23 @@ EOF
     if findmnt /data >/dev/null 2>&1; then
         local data_info
         data_info=$(df -h /data | tail -1)
-        log "INFO" "/data partition status:"
-        log "INFO" "  Mount: $(echo "$data_info" | awk '{print $1}')"
+        local mount_source
+        mount_source=$(echo "$data_info" | awk '{print $1}')
+        
+        log "INFO" "/data storage status:"
+        log "INFO" "  Mount: $mount_source"
         log "INFO" "  Size: $(echo "$data_info" | awk '{print $2}')"
         log "INFO" "  Available: $(echo "$data_info" | awk '{print $4}')"
         log "INFO" "  Usage: $(echo "$data_info" | awk '{print $5}')"
+        
+        # Determine if it's LVM or physical partition
+        if [[ "$mount_source" =~ /dev/mapper/ ]] || [[ "$mount_source" =~ /dev/.*-.*$ ]]; then
+            log "INFO" "  Type: LVM Logical Volume"
+        else
+            log "INFO" "  Type: Physical Partition"
+        fi
     else
-        log "INFO" "/data directory created (no partition - insufficient space)"
+        log "INFO" "/data directory created (no storage volume - insufficient space)"
     fi
     echo
     
