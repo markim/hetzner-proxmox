@@ -192,6 +192,15 @@ check_current_raid() {
 create_raid_mirrors() {
     log "INFO" "Creating RAID mirrors..."
     
+    # Check if any mirrors will affect the /var/lib/vz data storage
+    local data_storage_affected=false
+    if check_if_mirrors_affect_data_storage; then
+        data_storage_affected=true
+        log "INFO" "Mirror configuration will affect /var/lib/vz storage"
+        # Remove existing data storage configuration before creating mirrors
+        remove_data_storage_from_proxmox
+    fi
+    
     local mirror_index=0
     for mirror_group in "${MIRROR_GROUPS[@]}"; do
         IFS=' ' read -ra drives_in_mirror <<< "$mirror_group"
@@ -342,7 +351,31 @@ create_raid_mirrors() {
             if is_drive_in_raid "$drive"; then
                 local raid_device
                 raid_device=$(get_raid_device_for_drive "$drive")
-                log "INFO" "Drive $drive is already part of RAID array /dev/$raid_device, skipping single drive configuration"
+                log "INFO" "Drive $drive is already part of RAID array /dev/$raid_device"
+                log "INFO" "Setting up storage for existing RAID array..."
+                
+                # Set up storage for the existing array
+                if [[ -b "/dev/$raid_device" ]]; then
+                    # Check if it already has a filesystem
+                    if ! lsblk "/dev/$raid_device" -no FSTYPE | grep -q "ext4"; then
+                        log "INFO" "Creating ext4 filesystem on existing array /dev/$raid_device..."
+                        if ! mkfs.ext4 -F "/dev/$raid_device"; then
+                            log "ERROR" "Failed to create filesystem on /dev/$raid_device"
+                            mirror_index=$((mirror_index + 1))
+                            continue
+                        fi
+                    else
+                        log "INFO" "Existing array /dev/$raid_device already has filesystem"
+                    fi
+                    
+                    # Add to Proxmox storage
+                    if ! add_to_proxmox_storage "/dev/$raid_device" "existing-raid-$mirror_index"; then
+                        log "ERROR" "Failed to add existing RAID array to Proxmox storage"
+                    fi
+                else
+                    log "ERROR" "Expected RAID device /dev/$raid_device not found"
+                fi
+                
                 mirror_index=$((mirror_index + 1))
                 continue
             fi
@@ -377,6 +410,12 @@ create_raid_mirrors() {
             mirror_index=$((mirror_index + 1))
         fi
     done
+    
+    # Re-add data storage configuration if it was affected by mirroring
+    if $data_storage_affected; then
+        log "INFO" "Re-adding /var/lib/vz storage configuration after mirroring..."
+        readd_data_storage_to_proxmox
+    fi
 }
 
 # Function to add storage to Proxmox
@@ -439,6 +478,195 @@ add_to_proxmox_storage() {
     fi
 }
 
+# Function to remove existing data storage from Proxmox
+remove_data_storage_from_proxmox() {
+    local storage_name="data"
+    
+    log "INFO" "Checking if '$storage_name' storage needs to be removed from Proxmox..."
+    
+    # Check if Proxmox VE tools are available
+    if ! command -v pvesm >/dev/null 2>&1; then
+        log "DEBUG" "Proxmox VE tools not found - storage removal not needed"
+        return 0
+    fi
+    
+    # Check if the storage exists
+    if pvesm status -storage "$storage_name" &>/dev/null; then
+        log "INFO" "Removing existing '$storage_name' storage from Proxmox configuration..."
+        
+        # First try to disable the storage
+        if pvesm set "$storage_name" --disable 1 2>/dev/null; then
+            log "DEBUG" "Disabled '$storage_name' storage"
+        fi
+        
+        # Remove the storage
+        if pvesm remove "$storage_name" 2>/dev/null; then
+            log "INFO" "Successfully removed '$storage_name' storage from Proxmox"
+        else
+            log "WARN" "Failed to remove '$storage_name' storage from Proxmox (this may be normal)"
+        fi
+    else
+        log "DEBUG" "Storage '$storage_name' not found in Proxmox configuration"
+    fi
+}
+
+# Function to re-add data storage to Proxmox after mirroring
+readd_data_storage_to_proxmox() {
+    local data_dir="/var/lib/vz"
+    local storage_name="data"
+    
+    log "INFO" "Re-adding '$storage_name' storage to Proxmox configuration..."
+    
+    # Check if Proxmox VE tools are available
+    if ! command -v pvesm >/dev/null 2>&1; then
+        log "DEBUG" "Proxmox VE tools not found - will configure when Proxmox is installed"
+        return 0
+    fi
+    
+    # Ensure the data directory exists
+    if [[ ! -d "$data_dir" ]]; then
+        log "INFO" "Creating $data_dir directory..."
+        mkdir -p "$data_dir"
+        chown root:root "$data_dir"
+        chmod 755 "$data_dir"
+    fi
+    
+    # Add to Proxmox storage configuration if not already present
+    if ! pvesm status -storage "$storage_name" &>/dev/null; then
+        log "INFO" "Adding $data_dir as Proxmox storage '$storage_name'..."
+        # Add comprehensive content types for the data storage
+        if pvesm add dir "$storage_name" --path "$data_dir" --content "images,vztmpl,iso,snippets,backup,rootdir"; then
+            log "INFO" "Successfully added storage '$storage_name' to Proxmox"
+            
+            # Enable the storage if it's not enabled
+            if pvesm set "$storage_name" --disable 0 2>/dev/null; then
+                log "DEBUG" "Storage '$storage_name' enabled"
+            fi
+        else
+            log "ERROR" "Failed to add storage '$storage_name' to Proxmox"
+            return 1
+        fi
+    else
+        log "INFO" "Storage '$storage_name' already exists in Proxmox"
+        
+        # Ensure existing storage has all content types and is enabled
+        log "DEBUG" "Updating storage '$storage_name' configuration..."
+        if pvesm set "$storage_name" --content "images,vztmpl,iso,snippets,backup,rootdir" --disable 0 2>/dev/null; then
+            log "DEBUG" "Storage '$storage_name' configuration updated"
+        fi
+    fi
+    
+    # Show storage information
+    log "INFO" "Data storage configuration:"
+    log "INFO" "  Path: $data_dir"
+    log "INFO" "  Storage name: $storage_name"
+    log "INFO" "  Content types: images, vztmpl, iso, snippets, backup, rootdir"
+    log "INFO" "  Available space: $(df -h "$data_dir" 2>/dev/null | tail -1 | awk '{print $4}' || echo 'Unknown')"
+    
+    return 0
+}
+
+# Function to check if mirrors will affect the /var/lib/vz directory
+check_if_mirrors_affect_data_storage() {
+    local data_dir="/var/lib/vz"
+    local affects_data_storage=false
+    
+    # Check if /var/lib/vz is on any of the drives being mirrored
+    local data_storage_device
+    data_storage_device=$(df "$data_dir" 2>/dev/null | tail -1 | awk '{print $1}' || echo "")
+    
+    if [[ -n "$data_storage_device" ]]; then
+        # Get the base device (remove partition numbers)
+        local base_device
+        base_device=$(echo "$data_storage_device" | sed 's/[0-9]*$//' | sed 's/p$//')
+        
+        # Check if this base device is in our mirror groups
+        for mirror_group in "${MIRROR_GROUPS[@]}"; do
+            IFS=' ' read -ra drives_in_mirror <<< "$mirror_group"
+            for drive in "${drives_in_mirror[@]}"; do
+                if [[ "$drive" == "$base_device"* ]] || [[ "$base_device" == "$drive"* ]]; then
+                    affects_data_storage=true
+                    log "INFO" "Mirror configuration will affect $data_dir (currently on $data_storage_device)"
+                    break 2
+                fi
+            done
+        done
+    fi
+    
+    if $affects_data_storage; then
+        return 0  # true
+    else
+        return 1  # false
+    fi
+}
+
+# Function to check if a drive is already in a RAID array
+is_drive_in_raid() {
+    local drive="$1"
+    local drive_basename
+    drive_basename=$(basename "$drive")
+    
+    # Check if the drive appears in /proc/mdstat
+    if grep -q "$drive_basename" /proc/mdstat 2>/dev/null; then
+        return 0  # Drive is in RAID
+    fi
+    
+    # Also check lsblk output for raid type
+    if lsblk "$drive" -no TYPE 2>/dev/null | grep -q "raid1"; then
+        return 0  # Drive is in RAID
+    fi
+    
+    return 1  # Drive is not in RAID
+}
+
+# Function to get the RAID device name for a drive
+get_raid_device_for_drive() {
+    local drive="$1"
+    local drive_basename
+    drive_basename=$(basename "$drive")
+    
+    # Parse /proc/mdstat to find which md device contains this drive
+    while read -r line; do
+        if [[ "$line" =~ ^(md[0-9]+) ]]; then
+            local md_name="${BASH_REMATCH[1]}"
+            # Check if the drive is mentioned in this line or the next few lines
+            local found=false
+            echo "$line" | grep -q "$drive_basename" && found=true
+            
+            if $found; then
+                echo "$md_name"
+                return 0
+            fi
+        fi
+    done < /proc/mdstat
+    
+    return 1
+}
+
+# Function to clean up failed RAID arrays
+cleanup_failed_raid() {
+    local md_device="$1"
+    
+    log "INFO" "Cleaning up failed RAID array $md_device..."
+    
+    # Stop the array if it exists
+    if [[ -b "$md_device" ]]; then
+        mdadm --stop "$md_device" || log "WARN" "Failed to stop $md_device"
+    fi
+    
+    # Remove from mdadm.conf if present
+    if [[ -f /etc/mdadm/mdadm.conf ]]; then
+        sed -i "\|$md_device|d" /etc/mdadm/mdadm.conf
+    fi
+    
+    # Remove any stale entries from fstab
+    local device_name
+    device_name=$(basename "$md_device")
+    sed -i "/md.*$device_name/d" /etc/fstab
+    
+    log "INFO" "Cleaned up $md_device"
+}
+
 # Function to save RAID configuration
 save_raid_config() {
     log "INFO" "Saving RAID configuration..."
@@ -476,8 +704,30 @@ display_final_status() {
     df -h | grep "/mnt/pve" || log "INFO" "No /mnt/pve mounts found"
     echo
     
+    # Show summary of what was added to Proxmox
+    log "INFO" "Storage Added to Proxmox:"
+    local storage_count=0
+    while read -r line; do
+        if [[ "$line" =~ ^[[:space:]]*([^[:space:]]+)[[:space:]]+dir[[:space:]]+([^[:space:]]+)[[:space:]]+.*$ ]]; then
+            local storage_name="${BASH_REMATCH[1]}"
+            local storage_path="${BASH_REMATCH[2]}"
+            if [[ "$storage_path" =~ ^/mnt/pve/ ]]; then
+                log "INFO" "  - $storage_name: $storage_path"
+                ((storage_count++))
+            fi
+        fi
+    done < <(pvesm status)
+    
+    if [[ $storage_count -eq 0 ]]; then
+        log "INFO" "  No additional storage was added to Proxmox"
+    else
+        log "INFO" "  Total: $storage_count storage locations added"
+    fi
+    echo
+    
     log "INFO" "Drive configuration completed successfully!"
     log "INFO" "You can now use the configured storage in Proxmox VE"
+    log "INFO" "Access storage in Proxmox web interface under Datacenter > Storage"
 }
 
 # Function to show detailed drive information for debugging
@@ -647,7 +897,98 @@ setup_lvm_system_mirror() {
         ((partition_index++))
     done
     
-    # Step 4: Update system configuration for RAID boot
+    # Step 3.5: Handle any additional data partitions for Proxmox storage
+    log "INFO" "Checking for additional data partitions on system drive..."
+    for part_name in $system_partitions; do
+        local system_partition="/dev/$part_name"
+        local target_partition=""
+        
+        # Find corresponding target partition
+        local partition_num
+        partition_num=$(echo "$part_name" | grep -o '[0-9]*$')
+        
+        # Try different naming schemes for target partition
+        for candidate in "${target_drive}${partition_num}" "${target_drive}p${partition_num}"; do
+            if [[ -b "$candidate" ]]; then
+                target_partition="$candidate"
+                break
+            fi
+        done
+        
+        if [[ -z "$target_partition" ]]; then
+            continue
+        fi
+        
+        # Check if this is a data partition (not boot, not LVM, not special)
+        local is_data_partition=false
+        local partition_fstype
+        partition_fstype=$(lsblk "$system_partition" -lno FSTYPE 2>/dev/null || echo "")
+        
+        # Skip if it's a boot partition, LVM partition, or system partition
+        if lsblk "$system_partition" -lno MOUNTPOINT | grep -q "^/boot$"; then
+            continue  # Boot partition already handled
+        elif lsblk "$system_partition" -lno FSTYPE | grep -q "LVM2_member"; then
+            continue  # LVM partition already handled
+        elif lsblk "$system_partition" -lno MOUNTPOINT | grep -qE "^(/|/var|/usr|/home)$"; then
+            continue  # System partition
+        elif [[ "$partition_fstype" == "ext4" ]] || [[ "$partition_fstype" == "xfs" ]] || [[ -z "$partition_fstype" ]]; then
+            # This could be a data partition
+            is_data_partition=true
+        fi
+        
+        if $is_data_partition; then
+            log "INFO" "Found potential data partition: $system_partition (fstype: $partition_fstype)"
+            
+            # Create RAID device for data partition
+            local data_md_device="/dev/md$((mirror_index + 20 + partition_index))"  # Offset to avoid conflicts
+            
+            log "INFO" "Creating RAID1 for data partition: $system_partition -> $data_md_device"
+            
+            # Create degraded RAID1 array with target partition
+            if mdadm --create "$data_md_device" --level=1 --raid-devices=2 missing "$target_partition" --force; then
+                # Wait for array to be ready
+                sleep 3
+                
+                # If source partition has data, copy it
+                if [[ -n "$partition_fstype" ]]; then
+                    log "INFO" "Copying data from $system_partition to $data_md_device..."
+                    if dd if="$system_partition" of="$data_md_device" bs=64K status=progress; then
+                        # Add original partition to RAID array
+                        log "INFO" "Adding $system_partition to RAID array $data_md_device..."
+                        mdadm --add "$data_md_device" "$system_partition"
+                    else
+                        log "ERROR" "Failed to copy data to $data_md_device"
+                        continue
+                    fi
+                else
+                    # No filesystem, create one and add original partition
+                    log "INFO" "Creating filesystem on $data_md_device..."
+                    if mkfs.ext4 -F "$data_md_device"; then
+                        mdadm --add "$data_md_device" "$system_partition"
+                    else
+                        log "ERROR" "Failed to create filesystem on $data_md_device"
+                        continue
+                    fi
+                fi
+                
+                # Add to Proxmox storage
+                if ! add_to_proxmox_storage "$data_md_device" "system-data-$partition_index"; then
+                    log "ERROR" "Failed to add system data RAID to Proxmox storage"
+                fi
+                
+                log "INFO" "Successfully created RAID1 mirror for data partition"
+                ((partition_index++))
+            else
+                log "ERROR" "Failed to create RAID array $data_md_device for data partition"
+            fi
+        fi
+    done
+    
+    # Step 4: Re-add the main /var/lib/vz data storage after system mirroring
+    log "INFO" "Re-configuring /var/lib/vz data storage after system mirroring..."
+    readd_data_storage_to_proxmox
+    
+    # Step 5: Update system configuration for RAID boot
     if [[ -n "$boot_md_device" ]]; then
         log "INFO" "Updating system configuration for RAID boot..."
         update_system_for_raid_boot "$boot_md_device" "$lvm_md_device" "$system_drive" "$target_drive"
@@ -829,90 +1170,6 @@ update_grub_for_raid() {
     log "INFO" "GRUB configuration updated for RAID boot"
 }
 
-# Function to check if a drive is already in a RAID array
-is_drive_in_raid() {
-    local drive="$1"
-    local drive_basename
-    drive_basename=$(basename "$drive")
-    
-    # Check if the drive appears in /proc/mdstat
-    if grep -q "$drive_basename" /proc/mdstat 2>/dev/null; then
-        return 0  # Drive is in RAID
-    fi
-    
-    # Also check lsblk output for raid type
-    if lsblk "$drive" -no TYPE 2>/dev/null | grep -q "raid1"; then
-        return 0  # Drive is in RAID
-    fi
-    
-    return 1  # Drive is not in RAID
-}
-
-# Function to get the RAID device name for a drive
-get_raid_device_for_drive() {
-    local drive="$1"
-    local drive_basename
-    drive_basename=$(basename "$drive")
-    
-    # Parse /proc/mdstat to find which md device contains this drive
-    while read -r line; do
-        if [[ "$line" =~ ^(md[0-9]+) ]]; then
-            local md_name="${BASH_REMATCH[1]}"
-            # Check if the drive is mentioned in this line or the next few lines
-            local found=false
-            echo "$line" | grep -q "$drive_basename" && found=true
-            
-            if $found; then
-                echo "$md_name"
-                return 0
-            fi
-        fi
-    done < /proc/mdstat
-    
-    return 1
-}
-
-# Function to clean up failed RAID arrays
-cleanup_failed_raid() {
-    local md_device="$1"
-    
-    log "INFO" "Cleaning up failed RAID array $md_device..."
-    
-    # Stop the array if it exists
-    if [[ -b "$md_device" ]]; then
-        mdadm --stop "$md_device" || log "WARN" "Failed to stop $md_device"
-    fi
-    
-    # Remove from mdadm.conf if present
-    if [[ -f /etc/mdadm/mdadm.conf ]]; then
-        sed -i "\|$md_device|d" /etc/mdadm/mdadm.conf
-    fi
-    
-    # Remove any stale entries from fstab
-    local device_name
-    device_name=$(basename "$md_device")
-    sed -i "/md.*$device_name/d" /etc/fstab
-    
-    log "INFO" "Cleaned up $md_device"
-}
-
-# Function to check and clean existing broken RAID arrays
-check_and_clean_broken_raids() {
-    log "INFO" "Checking for broken RAID arrays..."
-    
-    # Check /proc/mdstat for degraded or failed arrays
-    if [[ -f /proc/mdstat ]]; then
-        while IFS= read -r line; do
-            if [[ $line =~ md[0-9]+.*\[.*F ]]; then
-                local array_name
-                array_name=$(echo "$line" | awk '{print $1}')
-                log "WARN" "Found failed RAID array: $array_name"
-                cleanup_failed_raid "/dev/$array_name"
-            fi
-        done < /proc/mdstat
-    fi
-}
-
 # Main function
 main() {
     log "INFO" "Starting Hetzner Proxmox drive configuration..."
@@ -922,10 +1179,7 @@ main() {
         log "ERROR" "This script must be run as root"
         exit 1
     fi
-    
-    # Check and clean any broken RAID arrays from previous runs
-    check_and_clean_broken_raids
-    
+        
     # Show detailed drive information if verbose logging is enabled
     if [[ "${LOG_LEVEL:-}" == "DEBUG" ]]; then
         show_drive_details
@@ -939,16 +1193,15 @@ main() {
     
     # Check current RAID status
     check_current_raid
-    
-    # Check and clean existing broken RAID arrays
-    check_and_clean_broken_raids
+
     
     # Ask for confirmation
     echo
     log "INFO" "=== PROPOSED CONFIGURATION ==="
-    log "INFO" "The following RAID configuration will be created:"
+    log "INFO" "The following RAID configuration will be created and added to Proxmox storage:"
     
     local mirror_index=0
+    local storage_to_add=0
     for mirror_group in "${MIRROR_GROUPS[@]}"; do
         IFS=' ' read -ra drives_in_mirror <<< "$mirror_group"
         
@@ -964,19 +1217,34 @@ main() {
             
             if $has_system_drive; then
                 log "INFO" "  SYSTEM MIRROR $mirror_index: ${drives_in_mirror[0]} + ${drives_in_mirror[1]} ⚠️"
+                log "INFO" "    └─ System mirror (boot/LVM), may include data partitions for Proxmox"
             else
                 log "INFO" "  RAID1 Mirror $mirror_index: ${drives_in_mirror[0]} + ${drives_in_mirror[1]}"
+                log "INFO" "    └─ Will be added to Proxmox as 'raid-mirror-$mirror_index'"
+                ((storage_to_add++))
             fi
         else
             # Check if this is a system drive
             if lsblk "${drives_in_mirror[0]}" -no MOUNTPOINT | grep -qE "^(/|/boot|/var|/usr|/home)$" 2>/dev/null; then
-                log "INFO" "  System Drive $mirror_index: ${drives_in_mirror[0]} (will be skipped)"
+                log "INFO" "  System Drive $mirror_index: ${drives_in_mirror[0]} (will be skipped for storage)"
+            elif is_drive_in_raid "${drives_in_mirror[0]}"; then
+                local existing_raid
+                existing_raid=$(get_raid_device_for_drive "${drives_in_mirror[0]}")
+                log "INFO" "  Existing RAID Drive $mirror_index: ${drives_in_mirror[0]} (part of /dev/$existing_raid)"
+                log "INFO" "    └─ Will be added to Proxmox as 'existing-raid-$mirror_index'"
+                ((storage_to_add++))
             else
                 log "INFO" "  Single Drive $mirror_index: ${drives_in_mirror[0]}"
+                log "INFO" "    └─ Will be added to Proxmox as 'single-drive-$mirror_index'"
+                ((storage_to_add++))
             fi
         fi
         mirror_index=$((mirror_index + 1))
     done
+    
+    echo
+    log "INFO" "Summary: $storage_to_add storage location(s) will be added to Proxmox"
+    log "INFO" "Note: System drives already provide 'local' and 'local-lvm' storage"
     
     echo
     read -p "Do you want to proceed with this configuration? (y/N): " -r confirm

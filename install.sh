@@ -27,7 +27,7 @@ Automated setup for Hetzner Proxmox server with Caddy reverse proxy and HTTPS.
 
 COMMANDS:
     (no command)        Show this help and available commands
-    --setup-system      Optimize host system for Proxmox and ensure /data partition exists
+    --setup-system      Optimize host system for Proxmox and ensure /var/lib/vz partition exists
     --format-drives     Format non-system drives interactively (safe, asks for confirmation)
     --setup-mirrors     Scan drives and configure optimal RAID mirror arrays
     --remove-mirrors    Remove ALL RAID mirror configurations including system mirrors (preserves data on drives)
@@ -45,7 +45,7 @@ OPTIONS:
 EXAMPLES:
     $0                          # Show available commands (safe - shows help only)
     $0 --check-mac              # Verify MAC address configuration (recommended first step)
-    $0 --setup-system           # Optimize host system for Proxmox and setup /data partition
+    $0 --setup-system           # Optimize host system for Proxmox and setup /var/lib/vz partition
     $0 --format-drives          # Format non-system drives interactively
     $0 --setup-mirrors          # Scan drives and configure optimal RAID mirror arrays
     $0 --remove-mirrors         # Remove ALL RAID mirror configurations including system mirrors
@@ -587,7 +587,7 @@ main() {
             echo
             log "INFO" "Available commands:"
             log "INFO" "  --check-mac      ⭐ START HERE - Verify MAC address configuration"
-            log "INFO" "  --setup-system   🚀 Optimize host system for Proxmox and setup /data partition"
+            log "INFO" "  --setup-system   🚀 Optimize host system for Proxmox and setup /var/lib/vz partition"
             log "INFO" "  --format-drives  🧹 Format non-system drives interactively (safe)"
             log "INFO" "  --remove-mirrors 🧹 Remove ALL RAID mirror configurations including system (preserves data)"
             log "INFO" "  --setup-mirrors  🔧 Scan drives and configure optimal RAID mirror arrays"
@@ -602,7 +602,7 @@ main() {
             echo
             log "INFO" "Recommended first-time workflow:"
             log "INFO" "  1. $0 --check-mac     # Verify your configuration"
-            log "INFO" "  2. $0 --setup-system  # Optimize system and setup /data partition"
+            log "INFO" "  2. $0 --setup-system  # Optimize system and setup /var/lib/vz partition"
             log "INFO" "  3. $0 --format-drives # (Optional) Format drives for clean state"
             log "INFO" "  4. $0 --setup-mirrors # Configure RAID arrays"
             log "INFO" "  5. $0 --network       # Configure network"

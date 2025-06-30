@@ -50,7 +50,7 @@ Automated setup scripts for configuring a Hetzner server with Proxmox, pfSense f
 | Command | Description |
 |---------|-------------|
 | `./install.sh --check-mac` | **START HERE** - Verify MAC address configuration |
-| `./install.sh --setup-system` | Optimizes system for proxmox and adds /data to storage within proxmox |
+| `./install.sh --setup-system` | Optimizes system for Proxmox and adds /var/lib/vz as "data" storage within Proxmox |
 | `./install.sh --setup-mirrors` | Interactive drive and RAID configuration (optional) |
 | `./install.sh --caddy` | Install Caddy reverse proxy with HTTPS |
 | `./install.sh --network` | Configure network bridges for additional IPs |
