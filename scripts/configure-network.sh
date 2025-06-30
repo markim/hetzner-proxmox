@@ -16,7 +16,6 @@ load_env "$SCRIPT_DIR/.env"
 # Network configuration safety checks
 NETWORK_BACKUP_DIR="/root/network-backups"
 INTERFACES_FILE="/etc/network/interfaces"
-INTERFACES_BACKUP
 INTERFACES_BACKUP="$NETWORK_BACKUP_DIR/interfaces.backup.$(date +%Y%m%d_%H%M%S)"
 
 # Create backup directory
