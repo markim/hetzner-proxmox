@@ -19,7 +19,18 @@ detect_system_drive() {
     
     # Get the root filesystem mount point
     local root_device
-    root_device=$(findmnt -n -o SOURCE /)
+    if ! root_device=$(findmnt -n -o SOURCE / 2>/dev/null); then
+        log "ERROR" "Cannot determine root filesystem device using findmnt"
+        # Fallback: try to get root device from /proc/mounts
+        root_device=$(awk '$2 == "/" {print $1; exit}' /proc/mounts 2>/dev/null || true)
+        if [[ -z "$root_device" ]]; then
+            log "ERROR" "Cannot determine root filesystem device from /proc/mounts either"
+            return 1
+        fi
+        log "DEBUG" "Found root device from /proc/mounts: $root_device"
+    else
+        log "DEBUG" "Found root device from findmnt: $root_device"
+    fi
     
     if [[ -z "$root_device" ]]; then
         log "ERROR" "Cannot determine root filesystem device"
@@ -30,6 +41,7 @@ detect_system_drive() {
     if [[ "$root_device" =~ [0-9]$ ]]; then
         # Remove partition number to get disk
         root_device="${root_device%[0-9]*}"
+        log "DEBUG" "Detected partition, parent disk: $root_device"
     fi
     
     # If it's an md device, resolve to underlying drives
@@ -54,12 +66,23 @@ get_all_raid_arrays() {
         return 0
     fi
     
-    # Parse /proc/mdstat to get all md devices
-    while read -r line; do
+    if [[ ! -r /proc/mdstat ]]; then
+        log "ERROR" "Cannot read /proc/mdstat"
+        return 1
+    fi
+    
+    # Parse /proc/mdstat to get all md devices with timeout protection
+    local mdstat_content
+    if ! mdstat_content=$(timeout 5 cat /proc/mdstat 2>/dev/null); then
+        log "WARN" "Could not read /proc/mdstat within timeout"
+        return 0
+    fi
+    
+    while IFS= read -r line; do
         if [[ "$line" =~ ^(md[0-9]+) ]]; then
             arrays+=("${BASH_REMATCH[1]}")
         fi
-    done < /proc/mdstat
+    done <<< "$mdstat_content"
     
     printf '%s\n' "${arrays[@]}"
 }
@@ -69,12 +92,19 @@ get_raid_members() {
     local md_device="$1"
     local members=()
     
-    if [[ ! -f /proc/mdstat ]]; then
+    if [[ ! -f /proc/mdstat ]] || [[ ! -r /proc/mdstat ]]; then
+        return 0
+    fi
+    
+    # Get mdstat content with timeout protection
+    local mdstat_content
+    if ! mdstat_content=$(timeout 5 cat /proc/mdstat 2>/dev/null); then
+        log "WARN" "Could not read /proc/mdstat within timeout in get_raid_members"
         return 0
     fi
     
     # Find the line for this md device and extract member drives
-    while read -r line; do
+    while IFS= read -r line; do
         if [[ "$line" =~ ^$md_device ]]; then
             # Extract drive names from the line
             # Format: md0 : active raid1 sdb1[1] sda1[0]
@@ -88,7 +118,7 @@ get_raid_members() {
             fi
             break
         fi
-    done < /proc/mdstat
+    done <<< "$mdstat_content"
     
     printf '%s\n' "${members[@]}"
 }
@@ -219,11 +249,24 @@ show_raid_status() {
         return 0
     fi
     
+    # Check if /proc/mdstat is readable and has content
+    if [[ ! -r /proc/mdstat ]]; then
+        log "ERROR" "Cannot read /proc/mdstat"
+        return 1
+    fi
+    
     local arrays
     mapfile -t arrays < <(get_all_raid_arrays)
     
     if [[ ${#arrays[@]} -eq 0 ]]; then
         log "INFO" "No RAID arrays found"
+        # Still show /proc/mdstat for debugging
+        log "INFO" "Contents of /proc/mdstat:"
+        if timeout 5 cat /proc/mdstat 2>/dev/null; then
+            log "DEBUG" "/proc/mdstat read successfully"
+        else
+            log "WARN" "Could not read /proc/mdstat within timeout"
+        fi
         return 0
     fi
     
@@ -259,7 +302,11 @@ show_raid_status() {
     
     echo
     log "INFO" "Full /proc/mdstat:"
-    cat /proc/mdstat
+    if timeout 10 cat /proc/mdstat 2>/dev/null; then
+        log "DEBUG" "/proc/mdstat displayed successfully"
+    else
+        log "WARN" "Could not display /proc/mdstat within timeout"
+    fi
 }
 
 # Function to remove all non-system RAID arrays
@@ -410,6 +457,31 @@ EOF
     fi
     
     log "INFO" "Starting RAID removal process..."
+    
+    # Add debug information
+    log "DEBUG" "Checking /proc/mdstat file..."
+    if [[ -f /proc/mdstat ]]; then
+        log "DEBUG" "/proc/mdstat exists"
+        if [[ -r /proc/mdstat ]]; then
+            log "DEBUG" "/proc/mdstat is readable"
+            # Try to get basic info about the file
+            local file_size
+            file_size=$(wc -c < /proc/mdstat 2>/dev/null || echo "unknown")
+            log "DEBUG" "/proc/mdstat size: $file_size bytes"
+            
+            # Try to read just the first few lines
+            log "DEBUG" "First few lines of /proc/mdstat:"
+            if timeout 3 head -n 3 /proc/mdstat 2>/dev/null; then
+                log "DEBUG" "Successfully read first lines of /proc/mdstat"
+            else
+                log "WARN" "Could not read first lines of /proc/mdstat"
+            fi
+        else
+            log "WARN" "/proc/mdstat is not readable"
+        fi
+    else
+        log "DEBUG" "/proc/mdstat does not exist"
+    fi
     
     # Show current status first
     show_raid_status
