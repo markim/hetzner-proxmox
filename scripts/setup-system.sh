@@ -80,51 +80,72 @@ EOF
     log "INFO" "Configuring virtualization settings..."
     cat > /etc/sysctl.d/99-proxmox-virt.conf << 'EOF'
 # Virtualization tuning for Proxmox
-kernel.sched_migration_cost_ns = 5000000
+# Note: Some parameters may not be available on all kernel versions
+
+# Disable automatic process grouping (can interfere with VM scheduling)
 kernel.sched_autogroup_enabled = 0
+
+# Disable NUMA balancing for better VM performance
 kernel.numa_balancing = 0
 EOF
     
-    # Apply sysctl settings
-    log "INFO" "Applying sysctl settings..."
-    sysctl -p /etc/sysctl.d/99-proxmox-swappiness.conf
-    sysctl -p /etc/sysctl.d/99-proxmox-io.conf
-    sysctl -p /etc/sysctl.d/99-proxmox-network.conf
-    sysctl -p /etc/sysctl.d/99-proxmox-virt.conf
+    # Apply sysctl settings with error handling
+    log "INFO" "Applying system performance settings..."
+    
+    apply_sysctl_safe "/etc/sysctl.d/99-proxmox-swappiness.conf" "VM performance settings"
+    apply_sysctl_safe "/etc/sysctl.d/99-proxmox-io.conf" "I/O performance settings"
+    apply_sysctl_safe "/etc/sysctl.d/99-proxmox-network.conf" "network performance settings"
+    apply_sysctl_safe "/etc/sysctl.d/99-proxmox-virt.conf" "virtualization settings"
     
     # Configure CPU governor for performance
     log "INFO" "Configuring CPU governor..."
     if [[ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor ]]; then
-        echo "performance" > /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || true
-        
-        # Make it persistent
-        cat > /etc/systemd/system/cpu-performance.service << 'EOF'
+        # Try to set performance governor
+        if echo "performance" > /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null; then
+            log "INFO" "CPU governor set to performance mode"
+            
+            # Make it persistent
+            cat > /etc/systemd/system/cpu-performance.service << 'EOF'
 [Unit]
 Description=Set CPU governor to performance
 After=multi-user.target
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash -c 'for i in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo performance > $i; done'
+ExecStart=/bin/bash -c 'for i in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo performance > $i 2>/dev/null || true; done'
 RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
 EOF
-        
-        systemctl enable cpu-performance.service
-        systemctl start cpu-performance.service
+            
+            if systemctl enable cpu-performance.service 2>/dev/null && systemctl start cpu-performance.service 2>/dev/null; then
+                log "INFO" "CPU performance service enabled"
+            else
+                log "WARNING" "Could not enable CPU performance service"
+            fi
+        else
+            log "WARNING" "Could not set CPU governor to performance mode (may not be supported)"
+        fi
+    else
+        log "INFO" "CPU frequency scaling not available (this is normal in virtual environments)"
     fi
     
     # Configure irqbalance for better interrupt handling
     log "INFO" "Configuring IRQ balancing..."
-    systemctl enable irqbalance
-    systemctl start irqbalance
+    if systemctl enable irqbalance 2>/dev/null && systemctl start irqbalance 2>/dev/null; then
+        log "INFO" "IRQ balancing service enabled"
+    else
+        log "WARNING" "Could not enable IRQ balancing service"
+    fi
     
     # Configure chrony for better time synchronization
     log "INFO" "Configuring time synchronization..."
-    systemctl enable chrony
-    systemctl start chrony
+    if systemctl enable chrony 2>/dev/null && systemctl start chrony 2>/dev/null; then
+        log "INFO" "Chrony time synchronization enabled"
+    else
+        log "WARNING" "Could not enable chrony service"
+    fi
     
     # Configure log rotation for Proxmox
     log "INFO" "Configuring log rotation..."
@@ -162,13 +183,22 @@ RuntimeMaxFileSize=5M
 MaxRetentionSec=1week
 EOF
     
-    systemctl restart systemd-journald
+    systemctl restart systemd-journald 2>/dev/null || log "WARNING" "Could not restart systemd-journald"
     
     # Enable and configure tuned for virtualization host profile
     log "INFO" "Configuring tuned for virtualization..."
-    systemctl enable tuned
-    systemctl start tuned
-    tuned-adm profile virtual-host 2>/dev/null || tuned-adm profile throughput-performance
+    if systemctl enable tuned 2>/dev/null && systemctl start tuned 2>/dev/null; then
+        # Try virtual-host profile first, fallback to throughput-performance
+        if tuned-adm profile virtual-host 2>/dev/null; then
+            log "INFO" "Tuned configured with virtual-host profile"
+        elif tuned-adm profile throughput-performance 2>/dev/null; then
+            log "INFO" "Tuned configured with throughput-performance profile"
+        else
+            log "WARNING" "Could not configure tuned profile, using default"
+        fi
+    else
+        log "WARNING" "Could not start tuned service"
+    fi
     
     log "INFO" "System optimization completed successfully"
 }
@@ -458,6 +488,45 @@ setup_data_partition() {
     fi
     
     return 0
+}
+
+# Function to safely apply sysctl settings
+apply_sysctl_safe() {
+    local config_file="$1"
+    local description="$2"
+    
+    log "INFO" "Applying $description..."
+    
+    # Read the config file and apply each setting individually
+    local failed_settings=()
+    while IFS= read -r line; do
+        # Skip comments and empty lines
+        if [[ "$line" =~ ^[[:space:]]*# ]] || [[ -z "${line// }" ]]; then
+            continue
+        fi
+        
+        # Extract parameter name
+        if [[ "$line" =~ ^[[:space:]]*([^=]+)=[[:space:]]*(.+)$ ]]; then
+            local param="${BASH_REMATCH[1]// }"
+            local value="${BASH_REMATCH[2]// }"
+            
+            # Check if the parameter exists
+            if [[ -f "/proc/sys/${param//./\/}" ]]; then
+                if ! sysctl -w "${param}=${value}" >/dev/null 2>&1; then
+                    failed_settings+=("${param}")
+                fi
+            else
+                log "DEBUG" "Skipping unavailable parameter: $param"
+                failed_settings+=("${param} (not available)")
+            fi
+        fi
+    done < "$config_file"
+    
+    if [[ ${#failed_settings[@]} -gt 0 ]]; then
+        log "WARNING" "Some $description could not be applied: ${failed_settings[*]}"
+    else
+        log "INFO" "$description applied successfully"
+    fi
 }
 
 # Main function
