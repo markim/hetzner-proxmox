@@ -905,7 +905,7 @@ EOF
     log "INFO" "Proxmox system configured for pfSense integration"
     log "INFO" "Network bridges will be available after network restart:"
     log "INFO" "  - vmbr0: WAN bridge (connected to $SSH_INTERFACE)"
-    log "INFO" "  - vmbr1: LAN bridge (192.168.1.0/24)"
+    log "INFO" "  - vmbr1: LAN bridge (192.168.1.1/24)"
     log "INFO" "  - vmbr2: DMZ bridge (10.0.2.0/24)"
 }
 

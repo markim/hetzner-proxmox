@@ -182,7 +182,7 @@ create_pfsense_vm() {
     log "INFO" "  - CPU Cores: $PFSENSE_CPU_CORES"
     log "INFO" "  - Disk: $PFSENSE_DISK_SIZE"
     log "INFO" "  - WAN Interface: vmbr0 (connects to $PFSENSE_WAN_IP)"
-    log "INFO" "  - LAN Interface: vmbr1 (192.168.1.0/24)"
+    log "INFO" "  - LAN Interface: vmbr1 (192.168.1.1/24)"
     log "INFO" "  - DMZ Interface: vmbr2 (10.0.2.0/24)"
 }
 
