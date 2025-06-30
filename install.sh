@@ -27,6 +27,7 @@ Automated setup for Hetzner Proxmox server with Caddy reverse proxy and HTTPS.
 
 COMMANDS:
     (no command)        Show this help and available commands
+    --format-drives     Format non-system drives interactively (safe, asks for confirmation)
     --setup-mirrors     Scan drives and configure optimal RAID mirror arrays
     --remove-mirrors    Remove ALL RAID mirror configurations including system mirrors (preserves data on drives)
     --caddy             Install and configure Caddy with HTTPS (current functionality)
@@ -43,6 +44,7 @@ OPTIONS:
 EXAMPLES:
     $0                          # Show available commands (safe - shows help only)
     $0 --check-mac              # Verify MAC address configuration (recommended first step)
+    $0 --format-drives          # Format non-system drives interactively
     $0 --setup-mirrors          # Scan drives and configure optimal RAID mirror arrays
     $0 --remove-mirrors         # Remove ALL RAID mirror configurations including system mirrors
     $0 --caddy                  # Install Caddy with current configuration
@@ -52,6 +54,7 @@ EXAMPLES:
 
 RECOMMENDED WORKFLOW:
     1. $0 --check-mac           # Verify MAC addresses are correct
+    2. $0 --format-drives       # (Optional) Format any drives that need clean state
     3. $0 --network             # Apply network configuration
     5. $0 --caddy               # Install Caddy reverse proxy
     6. $0 --pfsense             # (Optional) Create pfSense firewall
@@ -113,6 +116,10 @@ parse_args() {
                 command="remove-mirrors"
                 shift
                 ;;
+            --format-drives)
+                command="format-drives"
+                shift
+                ;;
             --help|-h)
                 usage
                 exit 0
@@ -137,7 +144,7 @@ parse_args() {
                 export LOG_LEVEL="DEBUG"
                 shift
                 ;;
-            --caddy|--network|--pfsense|--firewalladmin|--check-mac|--setup-mirrors|--remove-mirrors)
+            --caddy|--network|--pfsense|--firewalladmin|--check-mac|--setup-mirrors|--remove-mirrors|--format-drives)
                 # Already handled above
                 shift
                 ;;
@@ -209,6 +216,22 @@ validate_setup() {
         "check-mac")
             # MAC address check doesn't require special validation - it just checks configuration
             log "INFO" "MAC address configuration check - no prerequisites required"
+            ;;
+        "format-drives")
+            # Drive formatting - check we have the required tools
+            log "INFO" "Drive formatting - checking for required tools"
+            if ! command -v lsblk &> /dev/null; then
+                log "ERROR" "lsblk command not found. Required for drive management."
+                exit 1
+            fi
+            if ! command -v parted &> /dev/null; then
+                log "ERROR" "parted command not found. Required for partitioning."
+                exit 1
+            fi
+            if ! command -v mkfs.ext4 &> /dev/null; then
+                log "ERROR" "mkfs.ext4 command not found. Required for formatting."
+                exit 1
+            fi
             ;;
         "setup-mirrors")
             # Drive mirror setup - check we have the required tools
@@ -469,6 +492,26 @@ run_remove_mirrors() {
 }
 
 
+# Run drive formatting
+run_format_drives() {
+    log "INFO" "Starting drive formatting process..."
+    log "INFO" "Logs are being written to: $LOG_FILE"
+    
+    # Run drive formatting script
+    run_script "scripts/format-drives.sh"
+    
+    log "INFO" "✅ Drive Formatting Complete!"
+    log "INFO" "Selected drives have been formatted successfully"
+    log "INFO" ""
+    log "INFO" "Next Steps:"
+    log "INFO" "1. Configure RAID mirrors: $0 --setup-mirrors"
+    log "INFO" "2. Configure network: $0 --network"
+    log "INFO" "3. Install Caddy: $0 --caddy"
+    log "INFO" ""
+    log "INFO" "Logs are available at: $LOG_FILE"
+}
+
+
 # Main installation function
 main() {
     case "${COMMAND:-}" in
@@ -486,6 +529,9 @@ main() {
             ;;
         "check-mac")
             run_mac_check
+            ;;
+        "format-drives")
+            run_format_drives
             ;;
         "setup-mirrors")
             run_setup_mirrors
@@ -505,6 +551,7 @@ main() {
             echo
             log "INFO" "Available commands:"
             log "INFO" "  --check-mac      ⭐ START HERE - Verify MAC address configuration"
+            log "INFO" "  --format-drives  🧹 Format non-system drives interactively (safe)"
             log "INFO" "  --remove-mirrors 🧹 Remove ALL RAID mirror configurations including system (preserves data)"
             log "INFO" "  --setup-mirrors  🔧 Scan drives and configure optimal RAID mirror arrays"
             log "INFO" "  --caddy          🌐 Install Caddy reverse proxy with HTTPS"
@@ -518,8 +565,10 @@ main() {
             echo
             log "INFO" "Recommended first-time workflow:"
             log "INFO" "  1. $0 --check-mac     # Verify your configuration"
-            log "INFO" "  2. $0 --network       # Preview network changes"
-            log "INFO" "  3. $0 --caddy         # Preview Caddy installation"
+            log "INFO" "  2. $0 --format-drives # (Optional) Format drives for clean state"
+            log "INFO" "  3. $0 --setup-mirrors # Configure RAID arrays"
+            log "INFO" "  4. $0 --network       # Configure network"
+            log "INFO" "  5. $0 --caddy         # Install Caddy"
             echo
             log "INFO" "⚠️  NEVER run without specifying a command - this prevents accidental execution!"
             exit 0
