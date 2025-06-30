@@ -5,6 +5,17 @@
 
 set -euo pipefail
 
+# Custom error handler
+error_handler() {
+    local line_no=$1
+    local error_code=$2
+    log "ERROR" "Script failed at line $line_no with exit code $error_code"
+    log "ERROR" "This error occurred in the format-drives script"
+}
+
+# Set up error handling
+trap 'error_handler ${LINENO} $?' ERR
+
 # Get script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
@@ -21,19 +32,53 @@ detect_system_drives() {
     local root_device
     root_device=$(findmnt -n -o SOURCE / 2>/dev/null || true)
     if [[ -n "$root_device" ]]; then
-        # If it's a partition, get the parent disk
-        if [[ "$root_device" =~ [0-9]$ ]]; then
-            root_device="${root_device%[0-9]*}"
+        # Handle LVM devices - trace back to physical volumes
+        if [[ "$root_device" =~ ^/dev/mapper/ || "$root_device" =~ ^/dev/.*-.*$ ]]; then
+            # This is an LVM device, find the underlying physical volumes
+            local vg_name
+            if [[ "$root_device" =~ /dev/mapper/(.*)-root ]]; then
+                vg_name="${BASH_REMATCH[1]}"
+            elif [[ "$root_device" =~ /dev/(.*)-root ]]; then
+                vg_name="${BASH_REMATCH[1]}"
+            fi
+            
+            if [[ -n "$vg_name" ]] && command -v pvs >/dev/null 2>&1; then
+                # Get physical volumes for this volume group
+                while IFS= read -r pv_device; do
+                    if [[ -n "$pv_device" ]]; then
+                        # Get the parent disk
+                        local parent_disk
+                        parent_disk=$(lsblk -no PKNAME "$pv_device" 2>/dev/null || true)
+                        if [[ -n "$parent_disk" ]]; then
+                            system_drives+=("$parent_disk")
+                        else
+                            # Fallback: extract disk name from partition
+                            parent_disk=$(basename "$pv_device")
+                            if [[ "$parent_disk" =~ [0-9]$ ]]; then
+                                parent_disk="${parent_disk%[0-9]*}"
+                            fi
+                            system_drives+=("$parent_disk")
+                        fi
+                    fi
+                done < <(pvs --noheadings -o pv_name 2>/dev/null | grep -v "^\s*$" || true)
+            fi
+        else
+            # Regular device
+            # If it's a partition, get the parent disk
+            if [[ "$root_device" =~ [0-9]$ ]]; then
+                root_device="${root_device%[0-9]*}"
+            fi
+            # Remove /dev/ prefix for consistency
+            root_device=$(basename "$root_device")
+            system_drives+=("$root_device")
         fi
-        # Remove /dev/ prefix for consistency
-        root_device=$(basename "$root_device")
-        system_drives+=("$root_device")
     fi
     
     # Get boot filesystem device if different
     local boot_device
     boot_device=$(findmnt -n -o SOURCE /boot 2>/dev/null || true)
-    if [[ -n "$boot_device" && "$boot_device" != "$root_device" ]]; then
+    if [[ -n "$boot_device" && "$boot_device" != "$(findmnt -n -o SOURCE / 2>/dev/null)" ]]; then
+        # If it's a partition, get the parent disk
         if [[ "$boot_device" =~ [0-9]$ ]]; then
             boot_device="${boot_device%[0-9]*}"
         fi
@@ -188,6 +233,12 @@ format_drive() {
     
     log "INFO" "Formatting drive /dev/$drive with $filesystem filesystem..."
     
+    # Verify drive exists
+    if [[ ! -b "/dev/$drive" ]]; then
+        log "ERROR" "Drive /dev/$drive does not exist"
+        return 1
+    fi
+    
     # Unmount any mounted partitions first
     local mounted_partitions
     mounted_partitions=$(findmnt -rn -o TARGET -S "/dev/$drive" 2>/dev/null || true)
@@ -196,40 +247,66 @@ format_drive() {
         while IFS= read -r mount_point; do
             if [[ -n "$mount_point" ]]; then
                 log "INFO" "Unmounting: $mount_point"
-                umount "$mount_point" || log "WARNING" "Failed to unmount $mount_point"
+                if ! umount "$mount_point" 2>/dev/null; then
+                    log "WARNING" "Failed to unmount $mount_point, trying force unmount"
+                    umount -l "$mount_point" 2>/dev/null || log "WARNING" "Failed to force unmount $mount_point"
+                fi
             fi
         done <<< "$mounted_partitions"
     fi
     
+    # Check for and unmount any partitions of this drive
+    log "INFO" "Checking for existing partitions to unmount..."
+    for partition in /dev/${drive}*; do
+        if [[ -b "$partition" && "$partition" != "/dev/$drive" ]]; then
+            local part_mount
+            part_mount=$(findmnt -n -o TARGET "$partition" 2>/dev/null || true)
+            if [[ -n "$part_mount" ]]; then
+                log "INFO" "Unmounting partition: $partition from $part_mount"
+                umount "$partition" 2>/dev/null || umount -l "$partition" 2>/dev/null || log "WARNING" "Failed to unmount $partition"
+            fi
+        fi
+    done
+    
     # Remove from any RAID arrays
-    local raid_devices
-    raid_devices=$(grep -l "${drive}" /proc/mdstat 2>/dev/null || true)
-    if [[ -n "$raid_devices" ]]; then
-        log "WARNING" "Drive /dev/$drive appears to be part of RAID arrays"
-        log "WARNING" "Please remove from RAID first using: ./install.sh --remove-mirrors"
-        return 1
+    if [[ -f /proc/mdstat ]]; then
+        local raid_usage
+        raid_usage=$(grep -E "${drive}[0-9]*\[" /proc/mdstat 2>/dev/null || true)
+        if [[ -n "$raid_usage" ]]; then
+            log "WARNING" "Drive /dev/$drive appears to be part of RAID arrays:"
+            echo "$raid_usage"
+            log "WARNING" "Please remove from RAID first using: ./install.sh --remove-mirrors"
+            return 1
+        fi
     fi
+    
+    # Wait a moment for unmounts to complete
+    sleep 1
     
     # Wipe any existing filesystem signatures
     log "INFO" "Wiping existing filesystem signatures..."
-    wipefs -a "/dev/$drive" 2>/dev/null || log "WARNING" "Failed to wipe signatures"
+    if ! wipefs -a "/dev/$drive" 2>/dev/null; then
+        log "WARNING" "Failed to wipe signatures, continuing anyway"
+    fi
     
     # Create new partition table
     log "INFO" "Creating new GPT partition table..."
-    parted "/dev/$drive" --script mklabel gpt || {
-        log "ERROR" "Failed to create partition table"
+    if ! parted "/dev/$drive" --script mklabel gpt 2>/dev/null; then
+        log "ERROR" "Failed to create partition table on /dev/$drive"
         return 1
-    }
+    fi
     
     # Create partition using all available space
     log "INFO" "Creating partition..."
-    parted "/dev/$drive" --script mkpart primary 0% 100% || {
-        log "ERROR" "Failed to create partition"
+    if ! parted "/dev/$drive" --script mkpart primary 0% 100% 2>/dev/null; then
+        log "ERROR" "Failed to create partition on /dev/$drive"
         return 1
-    }
+    fi
     
-    # Wait for partition to be created
+    # Wait for partition to be created and inform kernel
     sleep 2
+    partprobe "/dev/$drive" 2>/dev/null || true
+    sleep 1
     
     # Determine partition device name
     local partition_device
@@ -239,46 +316,50 @@ format_drive() {
         partition_device="/dev/${drive}1"
     fi
     
+    # Wait for partition device to appear
+    local retries=0
+    while [[ ! -b "$partition_device" && $retries -lt 10 ]]; do
+        log "INFO" "Waiting for partition device $partition_device to appear..."
+        sleep 1
+        ((retries++))
+    done
+    
+    if [[ ! -b "$partition_device" ]]; then
+        log "ERROR" "Partition device $partition_device did not appear after partitioning"
+        return 1
+    fi
+    
     # Format the partition
-    log "INFO" "Creating $filesystem filesystem..."
+    log "INFO" "Creating $filesystem filesystem on $partition_device..."
     case "$filesystem" in
         ext4)
+            local mkfs_args=(-F)
             if [[ -n "$label" ]]; then
-                mkfs.ext4 -F -L "$label" "$partition_device" || {
-                    log "ERROR" "Failed to format with ext4"
-                    return 1
-                }
-            else
-                mkfs.ext4 -F "$partition_device" || {
-                    log "ERROR" "Failed to format with ext4"
-                    return 1
-                }
+                mkfs_args+=(-L "$label")
+            fi
+            if ! mkfs.ext4 "${mkfs_args[@]}" "$partition_device" 2>/dev/null; then
+                log "ERROR" "Failed to format $partition_device with ext4"
+                return 1
             fi
             ;;
         xfs)
+            local mkfs_args=(-f)
             if [[ -n "$label" ]]; then
-                mkfs.xfs -f -L "$label" "$partition_device" || {
-                    log "ERROR" "Failed to format with xfs"
-                    return 1
-                }
-            else
-                mkfs.xfs -f "$partition_device" || {
-                    log "ERROR" "Failed to format with xfs"
-                    return 1
-                }
+                mkfs_args+=(-L "$label")
+            fi
+            if ! mkfs.xfs "${mkfs_args[@]}" "$partition_device" 2>/dev/null; then
+                log "ERROR" "Failed to format $partition_device with xfs"
+                return 1
             fi
             ;;
         btrfs)
+            local mkfs_args=(-f)
             if [[ -n "$label" ]]; then
-                mkfs.btrfs -f -L "$label" "$partition_device" || {
-                    log "ERROR" "Failed to format with btrfs"
-                    return 1
-                }
-            else
-                mkfs.btrfs -f "$partition_device" || {
-                    log "ERROR" "Failed to format with btrfs"
-                    return 1
-                }
+                mkfs_args+=(-L "$label")
+            fi
+            if ! mkfs.btrfs "${mkfs_args[@]}" "$partition_device" 2>/dev/null; then
+                log "ERROR" "Failed to format $partition_device with btrfs"
+                return 1
             fi
             ;;
         *)
@@ -291,7 +372,9 @@ format_drive() {
     
     # Show the result
     log "INFO" "New partition information:"
-    lsblk "/dev/$drive" 2>/dev/null || log "WARNING" "Could not display partition info"
+    if ! lsblk "/dev/$drive" 2>/dev/null; then
+        log "WARNING" "Could not display partition info for /dev/$drive"
+    fi
     
     return 0
 }
@@ -483,12 +566,19 @@ EOF
         for drive in "${drives_to_format[@]}"; do
             echo
             log "INFO" "Formatting /dev/$drive..."
-            if format_drive "$drive" "$filesystem" "$label"; then
+            
+            # Use a subshell to contain any errors from format_drive
+            if (
+                set -e  # Exit subshell on error, but don't exit main script
+                format_drive "$drive" "$filesystem" "$label"
+            ); then
                 ((success_count++))
                 log "INFO" "✅ Successfully formatted /dev/$drive"
             else
                 failed_drives+=("$drive")
                 log "ERROR" "❌ Failed to format /dev/$drive"
+                # Continue with next drive instead of exiting
+                continue
             fi
         done
         
