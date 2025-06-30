@@ -11,6 +11,7 @@ error_handler() {
     local error_code=$2
     log "ERROR" "Script failed at line $line_no with exit code $error_code"
     log "ERROR" "This error occurred in the format-drives script"
+    exit "$error_code"
 }
 
 # Set up error handling
@@ -335,7 +336,7 @@ format_drive() {
     while [[ ! -b "$partition_device" && $retries -lt 10 ]]; do
         log "INFO" "Waiting for partition device $partition_device to appear..."
         sleep 1
-        ((retries++))
+        retries=$((retries + 1))
     done
     
     if [[ ! -b "$partition_device" ]]; then
@@ -386,7 +387,10 @@ format_drive() {
     
     # Show the result
     log "INFO" "New partition information:"
-    if ! lsblk "/dev/$drive" 2>/dev/null; then
+    local lsblk_output
+    if lsblk_output=$(lsblk "/dev/$drive" 2>/dev/null); then
+        echo "$lsblk_output"
+    else
         log "WARNING" "Could not display partition info for /dev/$drive"
     fi
     
@@ -570,7 +574,7 @@ EOF
                     
                     if [[ "$duplicate" == "false" ]]; then
                         drives_to_format+=("${available_drives[$((num-1))]}")
-                        ((valid_count++))
+                        valid_count=$((valid_count + 1))
                     else
                         log "WARNING" "Drive $num already selected (ignoring duplicate)"
                     fi
@@ -689,30 +693,33 @@ EOF
         local failed_drives=()
         local drive_counter=1
         
+        # Temporarily disable exit on error to handle drive formatting failures gracefully
+        set +e
+        
         for drive in "${drives_to_format[@]}"; do
             echo
             log "INFO" "📀 [$drive_counter/${#drives_to_format[@]}] Formatting /dev/$drive..."
+            log "DEBUG" "About to format drive: $drive"
             
-            # Use a subshell to contain any errors from format_drive
-            # Disable exit on error for this section to ensure we continue with all drives
-            set +e
-            (
-                set -e  # Exit subshell on error, but don't exit main script
-                format_drive "$drive" "$filesystem" "$label"
-            )
-            local format_result=$?
-            set -e  # Re-enable exit on error
-            
-            if [[ $format_result -eq 0 ]]; then
-                ((success_count++))
+            # Format the drive
+            if format_drive "$drive" "$filesystem" "$label"; then
+                success_count=$((success_count + 1))
                 log "INFO" "✅ [$drive_counter/${#drives_to_format[@]}] Successfully formatted /dev/$drive"
+                log "DEBUG" "Drive $drive formatting completed successfully"
             else
                 failed_drives+=("$drive")
                 log "ERROR" "❌ [$drive_counter/${#drives_to_format[@]}] Failed to format /dev/$drive"
+                log "DEBUG" "Drive $drive formatting failed"
             fi
             
-            ((drive_counter++))
+            drive_counter=$((drive_counter + 1))
+            log "DEBUG" "Moving to next drive, counter now: $drive_counter"
         done
+        
+        # Re-enable exit on error
+        set -e
+        
+        log "DEBUG" "All drives processed, success_count: $success_count, failed: ${#failed_drives[@]}"
         
         echo
         log "INFO" "Formatting completed!"
@@ -737,7 +744,10 @@ EOF
             echo
             log "INFO" "Drive /dev/$drive:"
             # Use more robust error handling for status display
-            if ! lsblk "/dev/$drive" -o NAME,SIZE,FSTYPE,LABEL 2>/dev/null; then
+            local lsblk_output
+            if lsblk_output=$(lsblk "/dev/$drive" -o NAME,SIZE,FSTYPE,LABEL 2>/dev/null); then
+                echo "$lsblk_output"
+            else
                 log "WARNING" "Could not display detailed status for /dev/$drive"
                 # Try basic info as fallback
                 if [[ -b "/dev/$drive" ]]; then
@@ -783,6 +793,9 @@ EOF
     log "INFO" "1. Create RAID mirrors: ./install.sh --setup-mirrors"
     log "INFO" "2. Configure network: ./install.sh --network"
     log "INFO" "3. Install Caddy: ./install.sh --caddy"
+    
+    # Explicitly exit with success code
+    exit 0
 }
 
 # Execute main function if script is run directly
