@@ -373,14 +373,31 @@ run_caddy_setup() {
     if [[ "${LOG_LEVEL:-}" == "DEBUG" ]]; then
         caddy_args+=("--verbose")
     fi
-    
-    log "INFO" "Executing Caddy setup script..."
+     log "INFO" "Executing Caddy setup script..."
     if [[ "${DRY_RUN:-false}" == "true" ]]; then
         log "INFO" "Command: bash $script_path ${caddy_args[*]}"
     fi
-    
+
     if ! bash "$script_path" "${caddy_args[@]}"; then
         log "ERROR" "Caddy setup failed"
+        exit 1
+    fi
+
+    # Also run HTTPS configuration script
+    local https_script_path="$SCRIPT_DIR/scripts/setup-https.sh"
+    
+    if [[ ! -f "$https_script_path" ]]; then
+        log "ERROR" "HTTPS setup script not found: $https_script_path"
+        exit 1
+    fi
+
+    log "INFO" "Executing HTTPS configuration script..."
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        log "INFO" "Command: bash $https_script_path ${caddy_args[*]}"
+    fi
+
+    if ! bash "$https_script_path" "${caddy_args[@]}"; then
+        log "ERROR" "HTTPS configuration failed"
         exit 1
     fi
     
@@ -389,15 +406,18 @@ run_caddy_setup() {
         log "INFO" "To execute for real, run without --dry-run flag"
     else
         log "INFO" "✅ Caddy Setup Complete!"
-        log "INFO" "Caddy is now installed and configured"
+        log "INFO" "Caddy is now installed, configured, and running"
         log "INFO" ""
-        log "INFO" "Next Steps:"
-        log "INFO" "1. Configure your domain DNS to point to this server"
-        log "INFO" "2. Obtain SSL certificate (if not using Caddy's automatic HTTPS)"
-        log "INFO" "3. Access Caddy at: http://<your-server-ip> or https://<your-domain>"
+        log "INFO" "You should now be able to access Proxmox at: https://$DOMAIN"
+        log "INFO" ""
+        log "INFO" "If HTTPS is not working yet:"
+        log "INFO" "1. Ensure your domain DNS points to this server's IP"
+        log "INFO" "2. Check that ports 80 and 443 are open"
+        log "INFO" "3. Monitor Caddy logs: journalctl -u caddy -f"
+        log "INFO" "4. Check Caddy access logs: tail -f $CADDY_LOG_FILE"
         log "INFO" ""
         log "INFO" "Important Notes:"
-        log "INFO" "- If you encounter issues, check the Caddy logs at $CADDY_LOG_FILE"
+        log "INFO" "- SSL certificates are automatically managed by Caddy"
         log "INFO" "- Ensure your firewall allows traffic on ports 80 and 443"
         log "INFO" ""
         log "INFO" "Logs are available at: $LOG_FILE"
