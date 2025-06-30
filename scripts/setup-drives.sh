@@ -38,41 +38,34 @@ detect_drives() {
         local drive_name size mountpoint
         read -r drive_name size _ mountpoint <<< "$line"
         
-        # Skip the system drive - check multiple conditions
+        # Check if this is the system drive
         local is_system_drive=false
         
-        # Check if mounted at root
+        # Check if mounted at root or has system partitions
         if [[ -n "$mountpoint" ]] && [[ "$mountpoint" == "/" ]]; then
+            is_system_drive=true
+        elif lsblk "$drive_name" -no MOUNTPOINT | grep -qE "^(/|/boot|/var|/usr|/home)$" 2>/dev/null; then
+            is_system_drive=true
+        elif lsblk "$drive_name" -no LABEL 2>/dev/null | grep -qE "(proxmox|pve)" 2>/dev/null; then
             is_system_drive=true
         fi
         
-        # Check if any partition of this drive is mounted at system locations
-        if ! $is_system_drive; then
-            if lsblk "$drive_name" -no MOUNTPOINT | grep -qE "^(/|/boot|/var|/usr|/home)$" 2>/dev/null; then
-                is_system_drive=true
-            fi
-        fi
-        
-        # Check if this drive contains Proxmox installation
-        if ! $is_system_drive; then
-            if lsblk "$drive_name" -no LABEL 2>/dev/null | grep -qE "(proxmox|pve)" 2>/dev/null; then
-                is_system_drive=true
-            fi
-        fi
-        
+        # For system drives, we'll allow them but mark them specially
         if $is_system_drive; then
-            log "INFO" "  $drive_name ($size) - SYSTEM DRIVE (skipping)"
+            log "INFO" "  $drive_name ($size) - SYSTEM DRIVE (available for mirroring)"
+            AVAILABLE_DRIVES+=("$drive_name")
+            DRIVE_SIZES+=("$size")
             continue
         fi
         
-        # Check if drive has any mounted partitions (but not system ones)
+        # Check if drive has any other mounted partitions
         local has_mounted_partitions=false
         if lsblk "$drive_name" -no MOUNTPOINT | grep -q "^/" 2>/dev/null; then
             has_mounted_partitions=true
         fi
         
         if [[ "$has_mounted_partitions" == "true" ]]; then
-            log "INFO" "  $drive_name ($size) - HAS MOUNTED PARTITIONS (skipping)"
+            log "INFO" "  $drive_name ($size) - HAS OTHER MOUNTED PARTITIONS (skipping)"
         else
             log "INFO" "  $drive_name ($size) - AVAILABLE"
             AVAILABLE_DRIVES+=("$drive_name")
@@ -193,39 +186,71 @@ create_raid_mirrors() {
             local drive1="${drives_in_mirror[0]}"
             local drive2="${drives_in_mirror[1]}"
             
-            log "INFO" "Creating RAID1 mirror $md_device with drives: $drive1, $drive2"
-            
-            # Check if drives are clean
+            # Check if this involves the system drive
+            local has_system_drive=false
             for drive in "$drive1" "$drive2"; do
-                if lsblk "$drive" -no FSTYPE 2>/dev/null | grep -q "."; then
-                    log "WARN" "Drive $drive appears to have existing filesystem. Wiping..."
-                    wipefs -a "$drive"
+                if lsblk "$drive" -no MOUNTPOINT | grep -qE "^(/|/boot|/var|/usr|/home)$" 2>/dev/null; then
+                    has_system_drive=true
+                    break
                 fi
             done
             
-            # Create the RAID array
-            if mdadm --create "$md_device" --level=1 --raid-devices=2 "$drive1" "$drive2" --assume-clean; then
-                log "INFO" "Successfully created RAID1 array $md_device"
+            if $has_system_drive; then
+                log "WARN" "⚠️  SYSTEM DRIVE MIRROR DETECTED ⚠️"
+                log "WARN" "This will create a RAID1 mirror that includes your system drive."
+                log "WARN" "This is a complex operation that requires special handling."
+                log "WARN" "Mirror: $drive1 + $drive2"
+                echo
+                read -p "Are you sure you want to proceed with system drive mirroring? (y/N): " -r sys_confirm
+                if [[ ! "$sys_confirm" =~ ^[Yy]$ ]]; then
+                    log "INFO" "Skipping system drive mirror configuration"
+                    continue
+                fi
                 
-                # Wait for array to be ready
-                log "INFO" "Waiting for RAID array to initialize..."
-                mdadm --wait "$md_device"
-                
-                # Create filesystem
-                log "INFO" "Creating ext4 filesystem on $md_device..."
-                mkfs.ext4 -F "$md_device"
-                
-                # Add to Proxmox storage
-                add_to_proxmox_storage "$md_device" "raid-mirror-$mirror_index"
-                
-                mirror_index=$((mirror_index + 1))
+                log "INFO" "Setting up system drive mirror - this requires careful handling..."
+                setup_system_drive_mirror "$drive1" "$drive2" "$md_device" "$mirror_index"
             else
-                log "ERROR" "Failed to create RAID array $md_device"
+                log "INFO" "Creating RAID1 mirror $md_device with drives: $drive1, $drive2"
+                
+                # Check if drives are clean
+                for drive in "$drive1" "$drive2"; do
+                    if lsblk "$drive" -no FSTYPE 2>/dev/null | grep -q "."; then
+                        log "WARN" "Drive $drive appears to have existing filesystem. Wiping..."
+                        wipefs -a "$drive"
+                    fi
+                done
+                
+                # Create the RAID array
+                if mdadm --create "$md_device" --level=1 --raid-devices=2 "$drive1" "$drive2" --assume-clean; then
+                    log "INFO" "Successfully created RAID1 array $md_device"
+                    
+                    # Wait for array to be ready
+                    log "INFO" "Waiting for RAID array to initialize..."
+                    mdadm --wait "$md_device"
+                    
+                    # Create filesystem
+                    log "INFO" "Creating ext4 filesystem on $md_device..."
+                    mkfs.ext4 -F "$md_device"
+                    
+                    # Add to Proxmox storage
+                    add_to_proxmox_storage "$md_device" "raid-mirror-$mirror_index"
+                else
+                    log "ERROR" "Failed to create RAID array $md_device"
+                fi
             fi
+            
+            mirror_index=$((mirror_index + 1))
             
         elif [[ ${#drives_in_mirror[@]} -eq 1 ]]; then
             # Single drive setup
             local drive="${drives_in_mirror[0]}"
+            
+            # Check if this is a system drive
+            if lsblk "$drive" -no MOUNTPOINT | grep -qE "^(/|/boot|/var|/usr|/home)$" 2>/dev/null; then
+                log "INFO" "Skipping single system drive: $drive (already in use by system)"
+                continue
+            fi
+            
             log "INFO" "Configuring single drive: $drive"
             
             # Wipe drive if needed
@@ -346,6 +371,63 @@ show_drive_details() {
     done
 }
 
+# Function to setup system drive mirror (complex operation)
+setup_system_drive_mirror() {
+    local drive1="$1"
+    local drive2="$2"
+    local md_device="$3"
+    local mirror_index="$4"
+    
+    log "INFO" "Setting up system drive mirror: $drive1 + $drive2 -> $md_device"
+    
+    # Determine which drive is the system drive and which is the target
+    local system_drive=""
+    local target_drive=""
+    
+    if lsblk "$drive1" -no MOUNTPOINT | grep -qE "^(/|/boot|/var|/usr|/home)$" 2>/dev/null; then
+        system_drive="$drive1"
+        target_drive="$drive2"
+    else
+        system_drive="$drive2"
+        target_drive="$drive1"
+    fi
+    
+    log "INFO" "System drive: $system_drive"
+    log "INFO" "Target drive: $target_drive"
+    
+    # For system drive mirroring, we need to:
+    # 1. Clean the target drive
+    # 2. Create a degraded RAID array with just the target drive
+    # 3. Copy the system to the RAID array
+    # 4. Add the original system drive to the array
+    # This is complex and requires careful handling
+    
+    log "WARN" "System drive mirroring is a complex operation that should be done manually."
+    log "WARN" "For safety, we'll set up the target drive as a single drive instead."
+    log "WARN" "You can manually convert to RAID later using mdadm."
+    
+    # Clean the target drive
+    if lsblk "$target_drive" -no FSTYPE 2>/dev/null | grep -q "."; then
+        log "INFO" "Cleaning target drive $target_drive..."
+        wipefs -a "$target_drive"
+    fi
+    
+    # Set up target drive as single storage for now
+    log "INFO" "Creating ext4 filesystem on target drive $target_drive..."
+    mkfs.ext4 -F "$target_drive"
+    
+    # Add to Proxmox storage
+    add_to_proxmox_storage "$target_drive" "system-mirror-ready-$mirror_index"
+    
+    log "INFO" "Target drive $target_drive is ready for manual system mirroring"
+    log "INFO" "To complete system mirroring, you'll need to:"
+    log "INFO" "1. Create a degraded RAID1 array with the target drive"
+    log "INFO" "2. Copy your system partitions to the RAID array"
+    log "INFO" "3. Update bootloader and fstab"
+    log "INFO" "4. Add the original system drive to the RAID array"
+    log "INFO" "This process requires advanced knowledge and should be done carefully."
+}
+
 # Main function
 main() {
     log "INFO" "Starting Hetzner Proxmox drive configuration..."
@@ -380,9 +462,27 @@ main() {
         IFS=' ' read -ra drives_in_mirror <<< "$mirror_group"
         
         if [[ ${#drives_in_mirror[@]} -eq 2 ]]; then
-            log "INFO" "  RAID1 Mirror $mirror_index: ${drives_in_mirror[0]} + ${drives_in_mirror[1]}"
+            # Check if this involves a system drive
+            local has_system_drive=false
+            for drive in "${drives_in_mirror[@]}"; do
+                if lsblk "$drive" -no MOUNTPOINT | grep -qE "^(/|/boot|/var|/usr|/home)$" 2>/dev/null; then
+                    has_system_drive=true
+                    break
+                fi
+            done
+            
+            if $has_system_drive; then
+                log "INFO" "  SYSTEM MIRROR $mirror_index: ${drives_in_mirror[0]} + ${drives_in_mirror[1]} ⚠️"
+            else
+                log "INFO" "  RAID1 Mirror $mirror_index: ${drives_in_mirror[0]} + ${drives_in_mirror[1]}"
+            fi
         else
-            log "INFO" "  Single Drive $mirror_index: ${drives_in_mirror[0]}"
+            # Check if this is a system drive
+            if lsblk "${drives_in_mirror[0]}" -no MOUNTPOINT | grep -qE "^(/|/boot|/var|/usr|/home)$" 2>/dev/null; then
+                log "INFO" "  System Drive $mirror_index: ${drives_in_mirror[0]} (will be skipped)"
+            else
+                log "INFO" "  Single Drive $mirror_index: ${drives_in_mirror[0]}"
+            fi
         fi
         mirror_index=$((mirror_index + 1))
     done
