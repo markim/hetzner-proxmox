@@ -148,7 +148,7 @@ If you prefer to run individual components:
 
 ```bash
 # Install Caddy
-./scripts/install-caddy.sh
+./scripts/setup-caddy.sh
 
 # Configure network
 ./scripts/configure-network.sh
