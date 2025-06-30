@@ -342,21 +342,33 @@ get_lvm_free_space() {
     local pv_devices=()
     
     # Check the drive itself
+    log "DEBUG" "Checking if /dev/$drive is a PV..."
     if pvs "/dev/$drive" >/dev/null 2>&1; then
         log "DEBUG" "Drive /dev/$drive is a PV"
         pv_devices+=("/dev/$drive")
+    else
+        log "DEBUG" "Drive /dev/$drive is NOT a PV"
     fi
     
     # Check all partitions of the drive
+    log "DEBUG" "Getting partitions for /dev/$drive..."
+    local partition_list
+    partition_list=$(lsblk -no NAME "/dev/$drive" 2>/dev/null | tail -n +2 | grep -E "^${drive}[0-9p]+" | sed 's/^[[:space:]]*//' || true)
+    log "DEBUG" "Partition list: '$partition_list'"
+    
     while IFS= read -r partition; do
         if [[ -n "$partition" && -b "/dev/$partition" ]]; then
-            log "DEBUG" "Checking partition: /dev/$partition"
+            log "DEBUG" "Checking if partition /dev/$partition is a PV..."
             if pvs "/dev/$partition" >/dev/null 2>&1; then
                 log "DEBUG" "Partition /dev/$partition is a PV"
                 pv_devices+=("/dev/$partition")
+            else
+                log "DEBUG" "Partition /dev/$partition is NOT a PV"
             fi
+        else
+            log "DEBUG" "Skipping invalid partition: '$partition'"
         fi
-    done < <(lsblk -no NAME "/dev/$drive" 2>/dev/null | tail -n +2 | grep -E "^${drive}[0-9p]+" | sed 's/^[[:space:]]*//')
+    done <<< "$partition_list"
     
     log "DEBUG" "Found PV devices: ${pv_devices[*]}"
     
@@ -391,16 +403,19 @@ get_lvm_free_space() {
                 
                 # Get free space in this volume group (in bytes)
                 local vg_free_bytes
-                vg_free_bytes=$(vgs --noheadings -o vg_free --units B "$vg_name" 2>/dev/null | sed 's/[^0-9]//g' || echo "0")
+                local vgs_output
+                vgs_output=$(vgs --noheadings -o vg_free --units B "$vg_name" 2>/dev/null || echo "")
+                log "DEBUG" "Raw vgs output for $vg_name: '$vgs_output'"
                 
-                log "DEBUG" "VG $vg_name has free space: $vg_free_bytes bytes (raw)"
+                vg_free_bytes=$(echo "$vgs_output" | sed 's/[^0-9]//g' || echo "0")
+                log "DEBUG" "VG $vg_name has free space: $vg_free_bytes bytes (processed from: '$vgs_output')"
                 
                 # Ensure we have a valid number
                 if [[ "$vg_free_bytes" =~ ^[0-9]+$ ]] && [[ "$vg_free_bytes" -gt 0 ]]; then
                     total_free_bytes=$((total_free_bytes + vg_free_bytes))
                     log "DEBUG" "Added $vg_free_bytes bytes to total, new total: $total_free_bytes bytes"
                 else
-                    log "DEBUG" "Invalid or zero vg_free_bytes: '$vg_free_bytes'"
+                    log "DEBUG" "Invalid or zero vg_free_bytes: '$vg_free_bytes' (from raw: '$vgs_output')"
                 fi
             fi
         fi
