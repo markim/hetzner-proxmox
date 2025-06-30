@@ -54,7 +54,10 @@ detect_system_drives() {
                         else
                             # Fallback: extract disk name from partition
                             parent_disk=$(basename "$pv_device")
-                            if [[ "$parent_disk" =~ [0-9]$ ]]; then
+                            # Handle both regular drives (sda1) and NVMe drives (nvme0n1p1)
+                            if [[ "$parent_disk" =~ ^nvme[0-9]+n[0-9]+p[0-9]+$ ]]; then
+                                parent_disk="${parent_disk%p[0-9]*}"
+                            elif [[ "$parent_disk" =~ [0-9]$ ]]; then
                                 parent_disk="${parent_disk%[0-9]*}"
                             fi
                             system_drives+=("$parent_disk")
@@ -65,7 +68,10 @@ detect_system_drives() {
         else
             # Regular device
             # If it's a partition, get the parent disk
-            if [[ "$root_device" =~ [0-9]$ ]]; then
+            # Handle both regular drives (sda1) and NVMe drives (nvme0n1p1)
+            if [[ "$root_device" =~ ^nvme[0-9]+n[0-9]+p[0-9]+$ ]]; then
+                root_device="${root_device%p[0-9]*}"
+            elif [[ "$root_device" =~ [0-9]$ ]]; then
                 root_device="${root_device%[0-9]*}"
             fi
             # Remove /dev/ prefix for consistency
@@ -79,7 +85,10 @@ detect_system_drives() {
     boot_device=$(findmnt -n -o SOURCE /boot 2>/dev/null || true)
     if [[ -n "$boot_device" && "$boot_device" != "$(findmnt -n -o SOURCE / 2>/dev/null)" ]]; then
         # If it's a partition, get the parent disk
-        if [[ "$boot_device" =~ [0-9]$ ]]; then
+        # Handle both regular drives (sda1) and NVMe drives (nvme0n1p1)
+        if [[ "$boot_device" =~ ^/dev/nvme[0-9]+n[0-9]+p[0-9]+$ ]]; then
+            boot_device="${boot_device%p[0-9]*}"
+        elif [[ "$boot_device" =~ [0-9]$ ]]; then
             boot_device="${boot_device%[0-9]*}"
         fi
         boot_device=$(basename "$boot_device")
@@ -115,7 +124,10 @@ detect_system_drives() {
                                             while [[ "$member_line" =~ ([a-zA-Z0-9]+)\[[0-9]+\] ]]; do
                                                 local member_device="${BASH_REMATCH[1]}"
                                                 # Get parent disk
-                                                if [[ "$member_device" =~ [0-9]$ ]]; then
+                                                # Handle both regular drives (sda1) and NVMe drives (nvme0n1p1)
+                                                if [[ "$member_device" =~ ^nvme[0-9]+n[0-9]+p[0-9]+$ ]]; then
+                                                    member_device="${member_device%p[0-9]*}"
+                                                elif [[ "$member_device" =~ [0-9]$ ]]; then
                                                     member_device="${member_device%[0-9]*}"
                                                 fi
                                                 # Add if not already in the list
@@ -257,6 +269,7 @@ format_drive() {
     
     # Check for and unmount any partitions of this drive
     log "INFO" "Checking for existing partitions to unmount..."
+    # shellcheck disable=SC2231
     for partition in /dev/${drive}*; do
         if [[ -b "$partition" && "$partition" != "/dev/$drive" ]]; then
             local part_mount
@@ -273,9 +286,10 @@ format_drive() {
         local raid_usage
         raid_usage=$(grep -E "${drive}[0-9]*\[" /proc/mdstat 2>/dev/null || true)
         if [[ -n "$raid_usage" ]]; then
-            log "WARNING" "Drive /dev/$drive appears to be part of RAID arrays:"
+            log "ERROR" "Drive /dev/$drive appears to be part of RAID arrays:"
             echo "$raid_usage"
-            log "WARNING" "Please remove from RAID first using: ./install.sh --remove-mirrors"
+            log "ERROR" "Cannot format drive that is part of active RAID arrays"
+            log "ERROR" "Please remove from RAID first using: ./install.sh --remove-mirrors"
             return 1
         fi
     fi
@@ -568,17 +582,21 @@ EOF
             log "INFO" "Formatting /dev/$drive..."
             
             # Use a subshell to contain any errors from format_drive
-            if (
+            # Disable exit on error for this section to ensure we continue with all drives
+            set +e
+            (
                 set -e  # Exit subshell on error, but don't exit main script
                 format_drive "$drive" "$filesystem" "$label"
-            ); then
+            )
+            local format_result=$?
+            set -e  # Re-enable exit on error
+            
+            if [[ $format_result -eq 0 ]]; then
                 ((success_count++))
                 log "INFO" "✅ Successfully formatted /dev/$drive"
             else
                 failed_drives+=("$drive")
                 log "ERROR" "❌ Failed to format /dev/$drive"
-                # Continue with next drive instead of exiting
-                continue
             fi
         done
         
@@ -587,7 +605,16 @@ EOF
         log "INFO" "Successfully formatted: $success_count of ${#drives_to_format[@]} drives"
         
         if [[ ${#failed_drives[@]} -gt 0 ]]; then
-            log "WARNING" "Failed to format: ${failed_drives[*]}"
+            log "WARNING" "Failed to format the following drives:"
+            for failed_drive in "${failed_drives[@]}"; do
+                log "WARNING" "  - /dev/$failed_drive"
+            done
+            echo
+            log "INFO" "Common reasons for formatting failures:"
+            log "INFO" "  - Drive is part of an active RAID array (use --remove-mirrors first)"
+            log "INFO" "  - Drive is mounted and cannot be unmounted"
+            log "INFO" "  - Drive has hardware issues"
+            log "INFO" "  - Insufficient permissions"
         fi
         
         echo
@@ -595,7 +622,16 @@ EOF
         for drive in "${drives_to_format[@]}"; do
             echo
             log "INFO" "/dev/$drive:"
-            lsblk "/dev/$drive" 2>/dev/null || log "WARNING" "Could not display status for /dev/$drive"
+            # Use more robust error handling for status display
+            if ! lsblk "/dev/$drive" 2>/dev/null; then
+                log "WARNING" "Could not display detailed status for /dev/$drive"
+                # Try basic info as fallback
+                if [[ -b "/dev/$drive" ]]; then
+                    log "INFO" "Drive /dev/$drive exists but status unavailable"
+                else
+                    log "WARNING" "Drive /dev/$drive no longer exists"
+                fi
+            fi
         done
         
         break
