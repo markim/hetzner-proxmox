@@ -40,6 +40,7 @@ detect_drives() {
         
         # Check if this is the system drive
         local is_system_drive=false
+        local is_raid_drive=false
         
         # Check if mounted at root or has system partitions
         if [[ -n "$mountpoint" ]] && [[ "$mountpoint" == "/" ]]; then
@@ -50,9 +51,24 @@ detect_drives() {
             is_system_drive=true
         fi
         
+        # Check if this drive is already part of a RAID array
+        if is_drive_in_raid "$drive_name"; then
+            is_raid_drive=true
+        fi
+        
         # For system drives, we'll allow them but mark them specially
         if $is_system_drive; then
             log "INFO" "  $drive_name ($size) - SYSTEM DRIVE (available for mirroring)"
+            AVAILABLE_DRIVES+=("$drive_name")
+            DRIVE_SIZES+=("$size")
+            continue
+        fi
+        
+        # For drives already in RAID, mark them but still include for potential storage setup
+        if $is_raid_drive; then
+            local raid_device
+            raid_device=$(get_raid_device_for_drive "$drive_name")
+            log "INFO" "  $drive_name ($size) - IN RAID ARRAY /dev/$raid_device (available for storage setup)"
             AVAILABLE_DRIVES+=("$drive_name")
             DRIVE_SIZES+=("$size")
             continue
@@ -186,6 +202,62 @@ create_raid_mirrors() {
             local drive1="${drives_in_mirror[0]}"
             local drive2="${drives_in_mirror[1]}"
             
+            # Check if these drives are already part of an existing RAID array
+            local drive1_in_raid=false
+            local drive2_in_raid=false
+            local existing_array=""
+            
+            if is_drive_in_raid "$drive1"; then
+                drive1_in_raid=true
+                existing_array=$(get_raid_device_for_drive "$drive1")
+            fi
+            
+            if is_drive_in_raid "$drive2"; then
+                drive2_in_raid=true
+                if [[ -z "$existing_array" ]]; then
+                    existing_array=$(get_raid_device_for_drive "$drive2")
+                fi
+            fi
+            
+            # Skip if both drives are already in the same RAID array
+            if $drive1_in_raid && $drive2_in_raid; then
+                log "INFO" "Drives $drive1 and $drive2 are already part of RAID array /dev/$existing_array"
+                log "INFO" "Skipping RAID creation and setting up storage for existing array..."
+                
+                # Set up storage for the existing array
+                if [[ -b "/dev/$existing_array" ]]; then
+                    # Check if it already has a filesystem
+                    if ! lsblk "/dev/$existing_array" -no FSTYPE | grep -q "ext4"; then
+                        log "INFO" "Creating ext4 filesystem on existing array /dev/$existing_array..."
+                        if ! mkfs.ext4 -F "/dev/$existing_array"; then
+                            log "ERROR" "Failed to create filesystem on /dev/$existing_array"
+                            mirror_index=$((mirror_index + 1))
+                            continue
+                        fi
+                    else
+                        log "INFO" "Existing array /dev/$existing_array already has filesystem"
+                    fi
+                    
+                    # Add to Proxmox storage
+                    if ! add_to_proxmox_storage "/dev/$existing_array" "raid-mirror-$mirror_index"; then
+                        log "ERROR" "Failed to add existing RAID array to Proxmox storage"
+                    fi
+                else
+                    log "ERROR" "Expected RAID device /dev/$existing_array not found"
+                fi
+                
+                mirror_index=$((mirror_index + 1))
+                continue
+            fi
+            
+            # Skip if one or both drives are in different RAID arrays
+            if $drive1_in_raid || $drive2_in_raid; then
+                log "WARN" "One or both drives ($drive1, $drive2) are already part of a RAID array"
+                log "WARN" "Cannot create new RAID with drives that are already in use"
+                mirror_index=$((mirror_index + 1))
+                continue
+            fi
+            
             # Check if this involves the system drive
             local has_system_drive=false
             for drive in "$drive1" "$drive2"; do
@@ -261,6 +333,15 @@ create_raid_mirrors() {
         elif [[ ${#drives_in_mirror[@]} -eq 1 ]]; then
             # Single drive setup
             local drive="${drives_in_mirror[0]}"
+            
+            # Check if this drive is already part of a RAID array
+            if is_drive_in_raid "$drive"; then
+                local raid_device
+                raid_device=$(get_raid_device_for_drive "$drive")
+                log "INFO" "Drive $drive is already part of RAID array /dev/$raid_device, skipping single drive configuration"
+                mirror_index=$((mirror_index + 1))
+                continue
+            fi
             
             # Check if this is a system drive
             if lsblk "$drive" -no MOUNTPOINT | grep -qE "^(/|/boot|/var|/usr|/home)$" 2>/dev/null; then
@@ -428,7 +509,7 @@ setup_system_drive_mirror() {
     # 1. Clean the target drive
     # 2. Create a degraded RAID array with just the target drive
     # 3. Copy the system to the RAID array
-    # 4. Add the original system drive to the array
+    # 4. Add the original system drive to the RAID array
     # This is complex and requires careful handling
     
     log "WARN" "System drive mirroring is a complex operation that should be done manually."
@@ -455,6 +536,49 @@ setup_system_drive_mirror() {
     log "INFO" "3. Update bootloader and fstab"
     log "INFO" "4. Add the original system drive to the RAID array"
     log "INFO" "This process requires advanced knowledge and should be done carefully."
+}
+
+# Function to check if a drive is already in a RAID array
+is_drive_in_raid() {
+    local drive="$1"
+    local drive_basename
+    drive_basename=$(basename "$drive")
+    
+    # Check if the drive appears in /proc/mdstat
+    if grep -q "$drive_basename" /proc/mdstat 2>/dev/null; then
+        return 0  # Drive is in RAID
+    fi
+    
+    # Also check lsblk output for raid type
+    if lsblk "$drive" -no TYPE 2>/dev/null | grep -q "raid1"; then
+        return 0  # Drive is in RAID
+    fi
+    
+    return 1  # Drive is not in RAID
+}
+
+# Function to get the RAID device name for a drive
+get_raid_device_for_drive() {
+    local drive="$1"
+    local drive_basename
+    drive_basename=$(basename "$drive")
+    
+    # Parse /proc/mdstat to find which md device contains this drive
+    while read -r line; do
+        if [[ "$line" =~ ^(md[0-9]+) ]]; then
+            local md_name="${BASH_REMATCH[1]}"
+            # Check if the drive is mentioned in this line or the next few lines
+            local found=false
+            echo "$line" | grep -q "$drive_basename" && found=true
+            
+            if $found; then
+                echo "$md_name"
+                return 0
+            fi
+        fi
+    done < /proc/mdstat
+    
+    return 1
 }
 
 # Main function
