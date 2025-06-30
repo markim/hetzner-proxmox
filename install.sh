@@ -27,8 +27,8 @@ Automated setup for Hetzner Proxmox server with Caddy reverse proxy and HTTPS.
 
 COMMANDS:
     (no command)        Show this help and available commands
-    --drives            Scan drives and configure optimal RAID arrays
-    --clear-raids       Remove all non-system RAID arrays (safe cleanup)
+    --setup-mirrors     Scan drives and configure optimal RAID mirror arrays
+    --remove-mirrors    Remove ALL RAID mirror configurations including system mirrors (preserves data on drives)
     --caddy             Install and configure Caddy with HTTPS (current functionality)
     --network           Configure network interfaces for additional Hetzner IPs
     --pfsense           Create and configure pfSense firewall VM (requires --network first)
@@ -43,8 +43,8 @@ OPTIONS:
 EXAMPLES:
     $0                          # Show available commands (safe - shows help only)
     $0 --check-mac              # Verify MAC address configuration (recommended first step)
-    $0 --drives                 # Scan drives and show optimal RAID configurations
-    $0 --clear-raids            # Remove all non-system RAID arrays (for cleanup/reset)
+    $0 --setup-mirrors          # Scan drives and configure optimal RAID mirror arrays
+    $0 --remove-mirrors         # Remove ALL RAID mirror configurations including system mirrors
     $0 --caddy                  # Install Caddy with current configuration
     $0 --network                # Configure network interfaces for additional IPs
     $0 --pfsense                # Create pfSense VM after network configuration
@@ -105,12 +105,12 @@ parse_args() {
                 command="check-mac"
                 shift
                 ;;
-            --drives)
-                command="drives"
+            --setup-mirrors)
+                command="setup-mirrors"
                 shift
                 ;;
-            --clear-raids)
-                command="clear-raids"
+            --remove-mirrors)
+                command="remove-mirrors"
                 shift
                 ;;
             --help|-h)
@@ -137,11 +137,7 @@ parse_args() {
                 export LOG_LEVEL="DEBUG"
                 shift
                 ;;
-            --raid-config)
-                export RAID_CONFIG="$2"
-                shift 2
-                ;;
-            --caddy|--network|--pfsense|--firewalladmin|--check-mac|--drives|--clear-raids)
+            --caddy|--network|--pfsense|--firewalladmin|--check-mac|--setup-mirrors|--remove-mirrors)
                 # Already handled above
                 shift
                 ;;
@@ -214,6 +210,18 @@ validate_setup() {
             # MAC address check doesn't require special validation - it just checks configuration
             log "INFO" "MAC address configuration check - no prerequisites required"
             ;;
+        "setup-mirrors")
+            # Drive mirror setup - check we have the required tools
+            log "INFO" "Drive mirror setup - checking for required tools"
+            if ! command -v lsblk &> /dev/null; then
+                log "ERROR" "lsblk command not found. Required for drive management."
+                exit 1
+            fi
+            if ! command -v mdadm &> /dev/null; then
+                log "ERROR" "mdadm command not found. Required for RAID management."
+                exit 1
+            fi
+            ;;
         "drives")
             # Drives configuration - check we have the required tools
             log "INFO" "Drive configuration - checking for required tools"
@@ -226,9 +234,9 @@ validate_setup() {
                 exit 1
             fi
             ;;
-        "clear-raids")
-            # RAID removal - check we have the required tools
-            log "INFO" "RAID removal - checking for required tools"
+        "remove-mirrors")
+            # RAID mirror removal - check we have the required tools
+            log "INFO" "RAID mirror removal - checking for required tools"
             if ! command -v mdadm &> /dev/null; then
                 log "ERROR" "mdadm command not found. Required for RAID management."
                 exit 1
@@ -419,15 +427,15 @@ run_mac_check() {
     log "INFO" "Logs are available at: $LOG_FILE"
 }
 
-# Run drives setup
-run_drives_setup() {
-    log "INFO" "Starting drive configuration and RAID setup..."
+# Run mirror setup
+run_setup_mirrors() {
+    log "INFO" "Starting drive configuration and RAID mirror setup..."
     log "INFO" "Logs are being written to: $LOG_FILE"
     
     # Run drives setup script
-    run_script "scripts/setup-drives.sh"
+    run_script "scripts/setup-mirrors.sh"
     
-    log "INFO" "✅ Drive Configuration Complete!"
+    log "INFO" "✅ Drive Mirror Configuration Complete!"
     log "INFO" "Drive mirrors have been configured successfully"
     log "INFO" ""
     log "INFO" "Next Steps:"
@@ -438,24 +446,28 @@ run_drives_setup() {
     log "INFO" "Logs are available at: $LOG_FILE"
 }
 
-# Run RAID cleanup
-run_clear_raids() {
-    log "INFO" "Starting RAID array cleanup..."
+# Run RAID mirror removal
+run_remove_mirrors() {
+    log "INFO" "Starting RAID mirror removal..."
     log "INFO" "Logs are being written to: $LOG_FILE"
     
     # Run RAID removal script
-    run_script "scripts/remove-raids.sh"
+    run_script "scripts/remove-mirrors.sh"
     
-    log "INFO" "✅ RAID Cleanup Complete!"
-    log "INFO" "Non-system RAID arrays have been safely removed"
+    log "INFO" "✅ RAID Mirror Removal Complete!"
+    log "INFO" "ALL RAID mirror configurations have been removed (including system mirrors)"
+    log "INFO" "Original data remains on individual drives"
+    log "INFO" ""
+    log "INFO" "⚠️  IMPORTANT: System may need to be rebooted to boot from individual drives"
     log "INFO" ""
     log "INFO" "Next Steps:"
-    log "INFO" "1. Run drive configuration: $0 --drives"
+    log "INFO" "1. Run drive configuration: $0 --setup-mirrors"
     log "INFO" "2. Configure network: $0 --network"
     log "INFO" "3. Install Caddy: $0 --caddy"
     log "INFO" ""
     log "INFO" "Logs are available at: $LOG_FILE"
 }
+
 
 # Main installation function
 main() {
@@ -475,11 +487,14 @@ main() {
         "check-mac")
             run_mac_check
             ;;
+        "setup-mirrors")
+            run_setup_mirrors
+            ;;
         "drives")
             run_drives_setup
             ;;
-        "clear-raids")
-            run_clear_raids
+        "remove-mirrors")
+            run_remove_mirrors
             ;;
         *)
             # No command specified - show usage and exit safely
@@ -490,8 +505,8 @@ main() {
             echo
             log "INFO" "Available commands:"
             log "INFO" "  --check-mac      ⭐ START HERE - Verify MAC address configuration"
-            log "INFO" "  --clear-raids    🧹 Remove all non-system RAID arrays (cleanup/reset)"
-            log "INFO" "  --drives         🔧 Prepare drives and configure RAID arrays"
+            log "INFO" "  --remove-mirrors 🧹 Remove ALL RAID mirror configurations including system (preserves data)"
+            log "INFO" "  --setup-mirrors  🔧 Scan drives and configure optimal RAID mirror arrays"
             log "INFO" "  --caddy          🌐 Install Caddy reverse proxy with HTTPS"
             log "INFO" "  --network        🔗 Configure network interfaces for additional IPs"
             log "INFO" "  --pfsense        🔥 Create pfSense firewall VM (requires --network first)"
