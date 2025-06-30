@@ -395,6 +395,398 @@ remove_all_mirrors() {
     fi
 }
 
+# ========================================================================
+# ADVANCED SYSTEM MIRRORING FUNCTIONS
+# ========================================================================
+# These functions provide proper system drive mirroring for advanced users
+# WARNING: Use these functions with extreme caution!
+
+# Function to setup system drive mirroring (Proxmox with LVM)
+setup_proxmox_system_mirror() {
+    local system_drive="$1"
+    local target_drive="$2"
+    
+    log "WARN" "⚠️  ADVANCED SYSTEM MIRRORING FOR PROXMOX ⚠️"
+    log "WARN" "This function sets up proper mirroring for Proxmox systems with LVM."
+    log "WARN" "This is an ADVANCED operation that can make your system unbootable!"
+    log "WARN" "System drive: $system_drive"
+    log "WARN" "Target drive: $target_drive"
+    echo
+    
+    # Verify this is a Proxmox system
+    if ! command -v pveversion >/dev/null 2>&1; then
+        log "ERROR" "This function is for Proxmox systems only"
+        return 1
+    fi
+    
+    # Check system setup
+    log "INFO" "Analyzing current Proxmox system setup..."
+    local boot_partition=""
+    local lvm_partition=""
+    
+    # Get partitions on system drive
+    local partitions
+    partitions=$(lsblk "$system_drive" -lno NAME,TYPE | grep "part" | awk '{print "/dev/"$1}')
+    
+    log "INFO" "System drive partitions:"
+    for part in $partitions; do
+        local mountpoint size fstype
+        mountpoint=$(lsblk "$part" -no MOUNTPOINT 2>/dev/null || echo "")
+        size=$(lsblk "$part" -no SIZE 2>/dev/null || echo "")
+        fstype=$(lsblk "$part" -no FSTYPE 2>/dev/null || echo "")
+        
+        log "INFO" "  $part ($size, $fstype) -> $mountpoint"
+        
+        if [[ "$mountpoint" == "/boot" ]]; then
+            boot_partition="$part"
+        elif [[ "$fstype" == "LVM2_member" ]]; then
+            lvm_partition="$part"
+            log "INFO" "    LVM partition detected: $lvm_partition"
+        fi
+    done
+    
+    if [[ -z "$boot_partition" ]] || [[ -z "$lvm_partition" ]]; then
+        log "ERROR" "Could not identify boot partition and LVM partition"
+        log "ERROR" "Boot: $boot_partition, LVM: $lvm_partition"
+        return 1
+    fi
+    
+    log "INFO" "Identified partitions:"
+    log "INFO" "  Boot partition: $boot_partition"
+    log "INFO" "  LVM partition: $lvm_partition"
+    
+    # Create the mirror setup
+    if ! create_proxmox_mirror_setup "$system_drive" "$target_drive" "$boot_partition" "$lvm_partition"; then
+        log "ERROR" "Failed to create Proxmox mirror setup"
+        return 1
+    fi
+    
+    log "INFO" "Proxmox system mirroring setup completed successfully!"
+    log "WARN" "System will need to be rebooted to activate RAID boot."
+    log "INFO" "Check RAID status after reboot with: cat /proc/mdstat"
+    
+    return 0
+}
+
+# Function to create Proxmox mirror setup
+create_proxmox_mirror_setup() {
+    local system_drive="$1"
+    local target_drive="$2"
+    local boot_partition="$3"
+    local lvm_partition="$4"
+    
+    log "INFO" "Creating Proxmox mirror setup..."
+    
+    # Step 1: Clone partition table
+    log "INFO" "Step 1: Cloning partition table from $system_drive to $target_drive..."
+    if ! sfdisk -d "$system_drive" | sfdisk "$target_drive"; then
+        log "ERROR" "Failed to clone partition table"
+        return 1
+    fi
+    
+    # Wait for partitions to be recognized
+    partprobe "$target_drive"
+    sleep 5
+    
+    # Step 2: Determine target partitions
+    local target_boot=""
+    local target_lvm=""
+    local boot_part_num=""
+    local lvm_part_num=""
+    
+    # Extract partition numbers
+    boot_part_num=$(echo "$boot_partition" | grep -o '[0-9]*$')
+    lvm_part_num=$(echo "$lvm_partition" | grep -o '[0-9]*$')
+    
+    # Determine target partition naming scheme
+    if [[ "$target_drive" =~ nvme ]]; then
+        target_boot="${target_drive}p${boot_part_num}"
+        target_lvm="${target_drive}p${lvm_part_num}"
+    else
+        target_boot="${target_drive}${boot_part_num}"
+        target_lvm="${target_drive}${lvm_part_num}"
+    fi
+    
+    # Wait for target partitions to be available
+    log "INFO" "Waiting for target partitions to be available..."
+    for i in {1..10}; do
+        if [[ -b "$target_boot" ]] && [[ -b "$target_lvm" ]]; then
+            break
+        fi
+        log "INFO" "Waiting for partitions... ($i/10)"
+        sleep 2
+    done
+    
+    if [[ ! -b "$target_boot" ]] || [[ ! -b "$target_lvm" ]]; then
+        log "ERROR" "Target partitions not available"
+        log "ERROR" "Expected: $target_boot, $target_lvm"
+        return 1
+    fi
+    
+    log "INFO" "Target partitions ready:"
+    log "INFO" "  Boot: $target_boot"
+    log "INFO" "  LVM: $target_lvm"
+    
+    # Step 3: Create RAID arrays
+    log "INFO" "Step 3: Creating RAID arrays..."
+    
+    # Create boot RAID (md126)
+    log "INFO" "Creating boot RAID array..."
+    if ! mdadm --create /dev/md126 --level=1 --raid-devices=2 missing "$target_boot" --force; then
+        log "ERROR" "Failed to create boot RAID array"
+        return 1
+    fi
+    
+    # Create LVM RAID (md127)
+    log "INFO" "Creating LVM RAID array..."
+    if ! mdadm --create /dev/md127 --level=1 --raid-devices=2 missing "$target_lvm" --force; then
+        log "ERROR" "Failed to create LVM RAID array"
+        return 1
+    fi
+    
+    # Wait for arrays to initialize
+    sleep 5
+    
+    # Step 4: Copy data
+    log "INFO" "Step 4: Copying boot partition data..."
+    if ! dd if="$boot_partition" of=/dev/md126 bs=64K status=progress; then
+        log "ERROR" "Failed to copy boot partition data"
+        return 1
+    fi
+    
+    log "INFO" "Copying LVM partition data (this may take a long time)..."
+    if ! dd if="$lvm_partition" of=/dev/md127 bs=64K status=progress; then
+        log "ERROR" "Failed to copy LVM partition data"
+        return 1
+    fi
+    
+    # Step 5: Add original partitions to RAID arrays
+    log "INFO" "Step 5: Adding original partitions to RAID arrays..."
+    
+    if ! mdadm --add /dev/md126 "$boot_partition"; then
+        log "ERROR" "Failed to add boot partition to RAID"
+        return 1
+    fi
+    
+    if ! mdadm --add /dev/md127 "$lvm_partition"; then
+        log "ERROR" "Failed to add LVM partition to RAID"
+        return 1
+    fi
+    
+    # Step 6: Update system configuration
+    log "INFO" "Step 6: Updating system configuration..."
+    
+    # Update fstab
+    update_fstab_for_proxmox_raid "$boot_partition" "$lvm_partition"
+    
+    # Update GRUB
+    update_grub_for_proxmox_raid "$system_drive" "$target_drive"
+    
+    # Update mdadm configuration
+    mdadm --detail --scan > /etc/mdadm/mdadm.conf
+    update-initramfs -u -k all
+    
+    log "INFO" "System configuration updated successfully"
+    
+    return 0
+}
+
+# Function to update fstab for Proxmox RAID
+update_fstab_for_proxmox_raid() {
+    local boot_partition="$1"
+    local lvm_partition="$2"
+    
+    log "INFO" "Updating /etc/fstab for Proxmox RAID setup..."
+    
+    # Backup fstab
+    local backup_file
+    backup_file="/etc/fstab.backup.$(date +%Y%m%d_%H%M%S)"
+    cp /etc/fstab "$backup_file"
+    log "INFO" "Backed up fstab to $backup_file"
+    
+    # Get UUIDs
+    local boot_uuid boot_raid_uuid
+    boot_uuid=$(blkid -s UUID -o value "$boot_partition" 2>/dev/null || echo "")
+    
+    # Wait for RAID devices to have UUIDs
+    sleep 3
+    boot_raid_uuid=$(blkid -s UUID -o value /dev/md126 2>/dev/null || echo "")
+    
+    # Update boot partition entry
+    if [[ -n "$boot_uuid" ]] && [[ -n "$boot_raid_uuid" ]]; then
+        log "INFO" "Updating boot partition UUID in fstab"
+        sed -i "s/UUID=$boot_uuid/UUID=$boot_raid_uuid/g" /etc/fstab
+    else
+        log "INFO" "Updating boot partition device in fstab"
+        sed -i "s|$boot_partition|/dev/md126|g" /etc/fstab
+    fi
+    
+    # Note: LVM will automatically use the RAID device once PVs are updated
+    log "INFO" "fstab updated for Proxmox RAID"
+}
+
+# Function to update GRUB for Proxmox RAID
+update_grub_for_proxmox_raid() {
+    local system_drive="$1"
+    local target_drive="$2"
+    
+    log "INFO" "Updating GRUB for Proxmox RAID boot..."
+    
+    # Ensure RAID modules are loaded
+    if [[ ! -f /etc/initramfs-tools/modules ]]; then
+        touch /etc/initramfs-tools/modules
+    fi
+    
+    # Add RAID modules
+    for module in raid1 md_mod; do
+        if ! grep -q "^$module$" /etc/initramfs-tools/modules; then
+            echo "$module" >> /etc/initramfs-tools/modules
+            log "INFO" "Added $module to initramfs modules"
+        fi
+    done
+    
+    # Update GRUB configuration
+    if [[ -f /etc/default/grub ]]; then
+        local grub_backup
+        grub_backup="/etc/default/grub.backup.$(date +%Y%m%d_%H%M%S)"
+        cp /etc/default/grub "$grub_backup"
+        log "INFO" "Backed up GRUB config to $grub_backup"
+        
+        # Add RAID preload modules
+        if ! grep -q "GRUB_PRELOAD_MODULES.*raid" /etc/default/grub; then
+            if grep -q "^GRUB_PRELOAD_MODULES=" /etc/default/grub; then
+                sed -i 's/^GRUB_PRELOAD_MODULES=.*/GRUB_PRELOAD_MODULES="raid mdraid1x"/' /etc/default/grub
+            else
+                echo 'GRUB_PRELOAD_MODULES="raid mdraid1x"' >> /etc/default/grub
+            fi
+            log "INFO" "Added RAID modules to GRUB preload"
+        fi
+    fi
+    
+    # Install GRUB on both drives
+    log "INFO" "Installing GRUB on both drives..."
+    grub-install "$system_drive" || log "WARN" "Failed to install GRUB on $system_drive"
+    grub-install "$target_drive" || log "WARN" "Failed to install GRUB on $target_drive"
+    
+    # Update GRUB configuration
+    update-grub || log "WARN" "Failed to update GRUB configuration"
+    
+    log "INFO" "GRUB configuration updated for RAID boot"
+}
+
+# Function to fix broken system RAID (like the current md1 issue)
+fix_broken_system_raid() {
+    log "INFO" "Checking for broken system RAID arrays..."
+    
+    # Get all RAID arrays
+    local arrays
+    arrays=$(get_all_raid_arrays)
+    
+    if [[ -z "$arrays" ]]; then
+        log "INFO" "No RAID arrays found"
+        return 0
+    fi
+    
+    for array in $arrays; do
+        log "INFO" "Checking RAID array: $array"
+        
+        # Check if array is degraded or has issues
+        local status
+        status=$(mdadm --detail "/dev/$array" 2>/dev/null | grep "State :" | awk '{print $3}' || echo "unknown")
+        
+        if [[ "$status" =~ (degraded|failed|inactive) ]]; then
+            log "WARN" "Found problematic RAID array: $array (status: $status)"
+            
+            # Ask user what to do
+            echo
+            log "INFO" "Options for $array:"
+            log "INFO" "1. Remove the broken array"
+            log "INFO" "2. Try to repair the array"
+            log "INFO" "3. Skip this array"
+            
+            read -p "What would you like to do? (1/2/3): " -r choice
+            
+            case $choice in
+                1)
+                    log "INFO" "Removing broken RAID array $array..."
+                    remove_single_array "$array" true
+                    ;;
+                2)
+                    log "INFO" "Attempting to repair RAID array $array..."
+                    repair_raid_array "$array"
+                    ;;
+                3)
+                    log "INFO" "Skipping array $array"
+                    ;;
+                *)
+                    log "WARN" "Invalid choice, skipping array $array"
+                    ;;
+            esac
+        else
+            log "INFO" "Array $array appears healthy (status: $status)"
+        fi
+    done
+}
+
+# Function to repair a RAID array
+repair_raid_array() {
+    local array="$1"
+    
+    log "INFO" "Attempting to repair RAID array: $array"
+    
+    # Try to reassemble the array
+    if mdadm --stop "/dev/$array" 2>/dev/null; then
+        log "INFO" "Stopped array $array"
+        
+        # Try to scan and assemble
+        if mdadm --assemble "/dev/$array" --scan; then
+            log "INFO" "Successfully reassembled array $array"
+        else
+            log "WARN" "Failed to reassemble array $array"
+            log "INFO" "Manual intervention may be required"
+        fi
+    else
+        log "WARN" "Could not stop array $array for repair"
+    fi
+}
+
+# Function to clean up broken system mirror (like the current md1)
+cleanup_broken_system_mirror() {
+    log "INFO" "=== CLEANING UP BROKEN SYSTEM MIRROR ==="
+    log "INFO" "This will remove the broken system RAID and restore normal operation."
+    echo
+    
+    # Check for the specific broken array mentioned in the user's log
+    if [[ -b /dev/md1 ]]; then
+        log "INFO" "Found broken system RAID array: md1"
+        
+        # Show current status
+        log "INFO" "Current md1 status:"
+        mdadm --detail /dev/md1 2>/dev/null || log "WARN" "Could not get md1 details"
+        
+        echo
+        read -p "Remove the broken md1 array? (y/N): " -r confirm
+        if [[ "$confirm" =~ ^[Yy]$ ]]; then
+            log "INFO" "Removing broken md1 array..."
+            
+            # Stop and remove the array
+            mdadm --stop /dev/md1 2>/dev/null || log "WARN" "Could not stop md1"
+            mdadm --zero-superblock /dev/nvme1n1p1 2>/dev/null || log "WARN" "Could not zero superblock on nvme1n1p1"
+            
+            # Update mdadm configuration
+            mdadm --detail --scan > /etc/mdadm/mdadm.conf
+            update-initramfs -u -k all
+            
+            log "INFO" "Broken system mirror cleaned up successfully"
+            log "INFO" "System should now boot normally from individual drives"
+        else
+            log "INFO" "Cleanup cancelled"
+        fi
+    else
+        log "INFO" "No broken md1 array found"
+    fi
+}
+
 # Main function
 main() {
     local force=false
@@ -411,31 +803,62 @@ main() {
                 show_status=true
                 shift
                 ;;
+            --cleanup-broken)
+                cleanup_broken_system_mirror
+                exit 0
+                ;;
+            --fix-raid)
+                fix_broken_system_raid
+                exit 0
+                ;;
+            --setup-system-mirror)
+                if [[ $# -lt 3 ]]; then
+                    log "ERROR" "Usage: $0 --setup-system-mirror <system_drive> <target_drive>"
+                    log "ERROR" "Example: $0 --setup-system-mirror /dev/nvme0n1 /dev/nvme1n1"
+                    exit 1
+                fi
+                setup_proxmox_system_mirror "$2" "$3"
+                exit 0
+                ;;
             --help|-h)
                 cat << EOF
-Usage: $0 [OPTIONS]
+Usage: $0 [OPTIONS] [ARGS]
 
 Remove ALL RAID mirror configurations (including system mirrors), preserving data on individual drives.
+Also provides advanced system mirroring functions for experienced users.
 
 OPTIONS:
-    --force     Skip confirmation prompts and force unmount if needed
-    --status    Show current RAID status and exit
-    --help      Show this help message
+    --force                           Skip confirmation prompts and force unmount if needed
+    --status                         Show current RAID status and exit
+    --cleanup-broken                 Clean up broken/degraded system RAID arrays
+    --fix-raid                       Attempt to fix broken RAID arrays interactively
+    --setup-system-mirror <sys> <tgt> Set up proper system mirroring (ADVANCED)
+    --help                           Show this help message
 
 EXAMPLES:
-    $0 --status         # Show current RAID arrays
-    $0                  # Remove ALL RAID mirrors including system (with confirmation)
-    $0 --force          # Remove ALL RAID mirrors including system (no confirmation)
+    $0 --status                              # Show current RAID arrays
+    $0                                       # Remove ALL RAID mirrors including system (with confirmation)
+    $0 --force                              # Remove ALL RAID mirrors including system (no confirmation)
+    $0 --cleanup-broken                     # Clean up broken system RAID arrays (like degraded md1)
+    $0 --fix-raid                           # Interactively fix broken RAID arrays
+    $0 --setup-system-mirror /dev/nvme0n1 /dev/nvme1n1  # Set up proper system mirroring
 
 SAFETY:
-    - Removes ALL RAID arrays including system/root arrays
+    - Regular options remove ALL RAID arrays including system/root arrays
     - Original data remains accessible on individual drives
     - System may need to be rebooted to boot from individual drives
     - Prompts for confirmation unless --force is used
     - Updates mdadm configuration after removal
 
+ADVANCED SYSTEM MIRRORING:
+    - --setup-system-mirror provides proper Proxmox system mirroring
+    - Creates separate RAID arrays for boot and LVM partitions
+    - Updates GRUB and fstab configurations automatically
+    - Requires manual verification and testing after setup
+
 WARNING:
-    This will remove system RAID mirrors! Ensure you can boot from individual drives.
+    System mirroring operations can make your system unbootable if not done correctly!
+    Always test in a development environment first.
 
 EOF
                 exit 0

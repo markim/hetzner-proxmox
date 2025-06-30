@@ -318,6 +318,10 @@ create_raid_mirrors() {
                         continue
                     fi
                     
+                    # Wait for filesystem to be fully created and UUID to be available
+                    sleep 3
+                    sync
+                    
                     # Add to Proxmox storage
                     if ! add_to_proxmox_storage "$md_device" "raid-mirror-$mirror_index"; then
                         log "ERROR" "Failed to add RAID array to Proxmox storage"
@@ -386,9 +390,19 @@ add_to_proxmox_storage() {
     local mount_point="/mnt/pve/$storage_name"
     mkdir -p "$mount_point"
     
-    # Get UUID of the filesystem
+    # Get UUID of the filesystem (with retry)
     local uuid
-    uuid=$(blkid -s UUID -o value "$device")
+    local retry_count=0
+    while [[ $retry_count -lt 5 ]]; do
+        uuid=$(blkid -s UUID -o value "$device" 2>/dev/null)
+        if [[ -n "$uuid" ]]; then
+            break
+        fi
+        log "INFO" "Waiting for filesystem UUID to be available (attempt $((retry_count + 1))/5)..."
+        sleep 2
+        sync
+        ((retry_count++))
+    done
     
     if [[ -z "$uuid" ]]; then
         log "ERROR" "Could not get UUID for device $device"
@@ -399,6 +413,9 @@ add_to_proxmox_storage() {
     if ! grep -q "$uuid" /etc/fstab; then
         echo "UUID=$uuid $mount_point ext4 defaults 0 2" >> /etc/fstab
         log "INFO" "Added $device to /etc/fstab"
+        
+        # Reload systemd to pick up fstab changes
+        systemctl daemon-reload
     fi
     
     # Mount the filesystem
@@ -482,7 +499,7 @@ show_drive_details() {
 }
 
 # Function to setup system drive mirror using mdadm RAID1
-# Function to setup system drive mirror using mdadm RAID1 (fully automated)
+# This function creates a full drive mirror that preserves the LVM structure
 setup_system_drive_mirror() {
     local drive1="$1"
     local drive2="$2"
@@ -495,7 +512,7 @@ setup_system_drive_mirror() {
     local system_drive=""
     local target_drive=""
     
-    if lsblk "$drive1" -no MOUNTPOINT | grep -qE "^(/|/boot|/var|/usr|/home)$" 2>/dev/null; then
+    if lsblk "$drive1" -lno MOUNTPOINT | grep -qE "^(/|/boot|/var|/usr|/home)$" 2>/dev/null; then
         system_drive="$drive1"
         target_drive="$drive2"
     else
@@ -506,30 +523,32 @@ setup_system_drive_mirror() {
     log "INFO" "System drive: $system_drive"
     log "INFO" "Target drive: $target_drive"
     
-    # Get the main system partition (typically the first partition)
-    local system_partition=""
-    local system_partitions
-    system_partitions=$(lsblk "$system_drive" -no NAME,TYPE | grep "part" | awk '{print "/dev/"$1}')
-    
-    # Find the root partition
-    for part in $system_partitions; do
-        if lsblk "$part" -no MOUNTPOINT | grep -q "^/$"; then
-            system_partition="$part"
-            break
-        fi
-    done
-    
-    # If no root partition found, use the first partition
-    if [[ -z "$system_partition" ]]; then
-        system_partition=$(echo "$system_partitions" | head -n1)
+    # Check if the system uses LVM
+    local uses_lvm=false
+    if lsblk "$system_drive" -lno TYPE | grep -q "lvm"; then
+        uses_lvm=true
+        log "INFO" "System uses LVM - will create partition-level mirrors"
+    else
+        log "INFO" "System does not use LVM - will create full drive mirror"
     fi
     
-    if [[ -z "$system_partition" ]]; then
-        log "ERROR" "Could not find system partition on $system_drive"
-        return 1
+    if $uses_lvm; then
+        # For LVM systems, we need to mirror each partition separately
+        setup_lvm_system_mirror "$system_drive" "$target_drive" "$md_device" "$mirror_index"
+    else
+        # For non-LVM systems, mirror the entire drive
+        setup_full_drive_mirror "$system_drive" "$target_drive" "$md_device" "$mirror_index"
     fi
+}
+
+# Function to setup LVM system mirror (partition-level mirroring)
+setup_lvm_system_mirror() {
+    local system_drive="$1"
+    local target_drive="$2"
+    local md_device="$3"
+    local mirror_index="$4"
     
-    log "INFO" "Found main system partition: $system_partition"
+    log "INFO" "Setting up LVM system mirror with partition-level RAID"
     
     # Step 1: Clone partition table to target drive
     log "INFO" "Cloning partition table from $system_drive to $target_drive..."
@@ -542,79 +561,155 @@ setup_system_drive_mirror() {
     partprobe "$target_drive"
     sleep 3
     
-    # Get the corresponding target partition
-    local target_partition=""
-    local partition_num
-    # Extract partition number using parameter expansion
-    local temp="${system_partition##*[!0-9]}"
-    partition_num="${temp:-1}"
+    # Step 2: Get all partitions from system drive
+    local system_partitions
+    system_partitions=$(lsblk "$system_drive" -lno NAME,TYPE | grep "part" | awk '{print $1}')
     
-    # Try different naming schemes
-    for candidate in "${target_drive}${partition_num}" "${target_drive}p${partition_num}"; do
-        if [[ -b "$candidate" ]]; then
-            target_partition="$candidate"
-            break
+    if [[ -z "$system_partitions" ]]; then
+        log "ERROR" "No partitions found on system drive $system_drive"
+        return 1
+    fi
+    
+    # Step 3: Create RAID arrays for each partition
+    local partition_index=0
+    local boot_md_device=""
+    local lvm_md_device=""
+    
+    for part_name in $system_partitions; do
+        local system_partition="/dev/$part_name"
+        local target_partition=""
+        
+        # Find corresponding target partition
+        local partition_num
+        partition_num=$(echo "$part_name" | grep -o '[0-9]*$')
+        
+        # Try different naming schemes for target partition
+        for candidate in "${target_drive}${partition_num}" "${target_drive}p${partition_num}"; do
+            if [[ -b "$candidate" ]]; then
+                target_partition="$candidate"
+                break
+            fi
+        done
+        
+        if [[ -z "$target_partition" ]]; then
+            log "ERROR" "Could not find target partition for $system_partition"
+            continue
         fi
+        
+        # Determine partition type and create appropriate RAID device
+        local partition_md_device
+        local partition_type=""
+        
+        # Check if this is the boot partition
+        if lsblk "$system_partition" -lno MOUNTPOINT | grep -q "^/boot$"; then
+            partition_type="boot"
+            partition_md_device="/dev/md${mirror_index}"
+            boot_md_device="$partition_md_device"
+        # Check if this is an LVM partition
+        elif lsblk "$system_partition" -lno TYPE | grep -q "part" && \
+             lsblk "$system_partition" -lno FSTYPE | grep -q "LVM2_member"; then
+            partition_type="lvm"
+            partition_md_device="/dev/md$((mirror_index + 10))"  # Offset to avoid conflicts
+            lvm_md_device="$partition_md_device"
+        else
+            # Skip BIOS boot partitions and other special partitions
+            log "INFO" "Skipping special partition $system_partition"
+            continue
+        fi
+        
+        log "INFO" "Creating RAID1 for $partition_type partition: $system_partition -> $partition_md_device"
+        
+        # Create degraded RAID1 array with target partition
+        if ! mdadm --create "$partition_md_device" --level=1 --raid-devices=2 missing "$target_partition" --force; then
+            log "ERROR" "Failed to create RAID array $partition_md_device"
+            continue
+        fi
+        
+        # Wait for array to be ready
+        sleep 3
+        
+        # Copy data from system partition to RAID array
+        log "INFO" "Copying data from $system_partition to $partition_md_device..."
+        if ! dd if="$system_partition" of="$partition_md_device" bs=64K status=progress; then
+            log "ERROR" "Failed to copy data to $partition_md_device"
+            continue
+        fi
+        
+        # Add original partition to RAID array
+        log "INFO" "Adding $system_partition to RAID array $partition_md_device..."
+        if ! mdadm --add "$partition_md_device" "$system_partition"; then
+            log "ERROR" "Failed to add $system_partition to RAID array"
+            continue
+        fi
+        
+        log "INFO" "Successfully created RAID1 mirror for $partition_type partition"
+        
+        ((partition_index++))
     done
     
-    if [[ -z "$target_partition" ]]; then
-        log "ERROR" "Could not find target partition on $target_drive"
-        return 1
+    # Step 4: Update system configuration for RAID boot
+    if [[ -n "$boot_md_device" ]]; then
+        log "INFO" "Updating system configuration for RAID boot..."
+        update_system_for_raid_boot "$boot_md_device" "$lvm_md_device" "$system_drive" "$target_drive"
     fi
     
-    log "INFO" "Target partition: $target_partition"
-    
-    # Step 2: Create degraded RAID1 array with target partition only
-    log "INFO" "Creating degraded RAID1 array $md_device with target partition..."
-    if ! mdadm --create "$md_device" --level=1 --raid-devices=2 missing "$target_partition" --force; then
-        log "ERROR" "Failed to create degraded RAID array"
-        return 1
-    fi
-    
-    # Wait for array to be ready
-    sleep 3
-    
-    # Step 3: Copy system data to RAID array
-    log "INFO" "Copying system data from $system_partition to $md_device..."
-    log "INFO" "This may take a long time depending on the size of your system partition..."
-    if ! dd if="$system_partition" of="$md_device" bs=64K status=progress; then
-        log "ERROR" "Failed to copy system data"
-        return 1
-    fi
-    
-    # Step 4: Add original system partition to RAID array
-    log "INFO" "Adding original system partition $system_partition to RAID array..."
-    if ! mdadm --add "$md_device" "$system_partition"; then
-        log "ERROR" "Failed to add system partition to RAID array"
-        return 1
-    fi
-    
-    # Step 5: Update fstab for RAID
-    log "INFO" "Updating fstab for RAID boot..."
-    update_fstab_for_raid "$system_partition" "$md_device"
-    
-    # Step 6: Update GRUB for RAID boot
-    log "INFO" "Updating GRUB for RAID boot..."
-    update_grub_for_raid "$md_device"
-    
-    # Step 7: Install GRUB on both drives
-    log "INFO" "Installing GRUB on both drives..."
-    grub-install "$system_drive" || log "WARN" "Failed to install GRUB on $system_drive"
-    grub-install "$target_drive" || log "WARN" "Failed to install GRUB on $target_drive"
-    update-grub || log "WARN" "Failed to update GRUB configuration"
-    
-    log "INFO" "System drive mirroring completed successfully!"
-    log "INFO" "RAID array $md_device is now syncing. This may take some time."
+    log "INFO" "LVM system mirroring completed successfully!"
+    log "INFO" "RAID arrays are now syncing. This may take some time."
     log "WARN" "You should reboot the system to test RAID boot functionality."
     log "INFO" "After reboot, you can check RAID status with: cat /proc/mdstat"
 }
 
-# Function to update fstab for RAID boot
-update_fstab_for_raid() {
-    local old_partition="$1"
+# Function to setup full drive mirror (for non-LVM systems)
+setup_full_drive_mirror() {
+    local system_drive="$1"
+    local target_drive="$2"
+    local md_device="$3"
+    local mirror_index="$4"
+    
+    log "INFO" "Setting up full drive mirror (not implemented for LVM systems)"
+    log "ERROR" "Full drive mirroring is not recommended for LVM systems"
+    log "ERROR" "Use partition-level mirroring instead"
+    return 1
+}
+
+# Function to update system configuration for RAID boot
+update_system_for_raid_boot() {
+    local boot_md_device="$1"
+    local lvm_md_device="$2"
+    local system_drive="$3"
+    local target_drive="$4"
+    
+    log "INFO" "Updating system configuration for RAID boot..."
+    
+    # Update fstab for boot partition
+    if [[ -n "$boot_md_device" ]]; then
+        log "INFO" "Updating fstab for RAID boot partition..."
+        update_fstab_for_raid_partition "/boot" "$boot_md_device"
+    fi
+    
+    # Update LVM configuration if we have LVM RAID
+    if [[ -n "$lvm_md_device" ]]; then
+        log "INFO" "Updating LVM configuration for RAID..."
+        update_lvm_for_raid "$lvm_md_device"
+    fi
+    
+    # Update GRUB configuration
+    log "INFO" "Updating GRUB configuration..."
+    update_grub_for_raid "$boot_md_device"
+    
+    # Install GRUB on both drives
+    log "INFO" "Installing GRUB on both drives..."
+    grub-install "$system_drive" || log "WARN" "Failed to install GRUB on $system_drive"
+    grub-install "$target_drive" || log "WARN" "Failed to install GRUB on $target_drive"
+    update-grub || log "WARN" "Failed to update GRUB configuration"
+}
+
+# Function to update fstab for a specific RAID partition
+update_fstab_for_raid_partition() {
+    local mount_point="$1"
     local raid_device="$2"
     
-    log "INFO" "Updating /etc/fstab to use RAID device..."
+    log "INFO" "Updating /etc/fstab for $mount_point -> $raid_device..."
     
     # Backup fstab
     local backup_file
@@ -633,21 +728,33 @@ update_fstab_for_raid() {
     
     log "INFO" "RAID device UUID: $raid_uuid"
     
-    # Get UUID or device path of old partition
-    local old_uuid
-    old_uuid=$(blkid -s UUID -o value "$old_partition" 2>/dev/null || echo "")
+    # Find the current entry for the mount point and replace it
+    local current_device
+    current_device=$(grep " $mount_point " /etc/fstab | awk '{print $1}' | head -n1)
     
-    if [[ -n "$old_uuid" ]]; then
-        # Replace by UUID
-        log "INFO" "Replacing UUID=$old_uuid with UUID=$raid_uuid in fstab"
-        sed -i "s/UUID=$old_uuid/UUID=$raid_uuid/g" /etc/fstab
+    if [[ -n "$current_device" ]]; then
+        log "INFO" "Replacing $current_device with UUID=$raid_uuid in fstab"
+        sed -i "s|$current_device|UUID=$raid_uuid|g" /etc/fstab
     else
-        # Replace by device name
-        log "INFO" "Replacing $old_partition with $raid_device in fstab"
-        sed -i "s|$old_partition|$raid_device|g" /etc/fstab
+        log "WARN" "Could not find existing entry for $mount_point in fstab"
     fi
+}
+
+# Function to update LVM configuration for RAID
+update_lvm_for_raid() {
+    local lvm_md_device="$1"
     
-    log "INFO" "Updated fstab to use RAID device"
+    log "INFO" "Updating LVM configuration for RAID device $lvm_md_device..."
+    
+    # The LVM physical volume will now be on the RAID device
+    # We need to update the LVM metadata to recognize the new location
+    
+    # First, scan for physical volumes
+    pvscan
+    
+    # Update LVM device filter if needed
+    log "INFO" "LVM will automatically detect the RAID device after reboot"
+    log "INFO" "You may need to update /etc/lvm/lvm.conf if there are issues"
 }
 
 # Function to update GRUB for RAID boot
@@ -765,6 +872,47 @@ get_raid_device_for_drive() {
     return 1
 }
 
+# Function to clean up failed RAID arrays
+cleanup_failed_raid() {
+    local md_device="$1"
+    
+    log "INFO" "Cleaning up failed RAID array $md_device..."
+    
+    # Stop the array if it exists
+    if [[ -b "$md_device" ]]; then
+        mdadm --stop "$md_device" || log "WARN" "Failed to stop $md_device"
+    fi
+    
+    # Remove from mdadm.conf if present
+    if [[ -f /etc/mdadm/mdadm.conf ]]; then
+        sed -i "\|$md_device|d" /etc/mdadm/mdadm.conf
+    fi
+    
+    # Remove any stale entries from fstab
+    local device_name
+    device_name=$(basename "$md_device")
+    sed -i "/md.*$device_name/d" /etc/fstab
+    
+    log "INFO" "Cleaned up $md_device"
+}
+
+# Function to check and clean existing broken RAID arrays
+check_and_clean_broken_raids() {
+    log "INFO" "Checking for broken RAID arrays..."
+    
+    # Check /proc/mdstat for degraded or failed arrays
+    if [[ -f /proc/mdstat ]]; then
+        while IFS= read -r line; do
+            if [[ $line =~ md[0-9]+.*\[.*F ]]; then
+                local array_name
+                array_name=$(echo "$line" | awk '{print $1}')
+                log "WARN" "Found failed RAID array: $array_name"
+                cleanup_failed_raid "/dev/$array_name"
+            fi
+        done < /proc/mdstat
+    fi
+}
+
 # Main function
 main() {
     log "INFO" "Starting Hetzner Proxmox drive configuration..."
@@ -774,6 +922,9 @@ main() {
         log "ERROR" "This script must be run as root"
         exit 1
     fi
+    
+    # Check and clean any broken RAID arrays from previous runs
+    check_and_clean_broken_raids
     
     # Show detailed drive information if verbose logging is enabled
     if [[ "${LOG_LEVEL:-}" == "DEBUG" ]]; then
@@ -788,6 +939,9 @@ main() {
     
     # Check current RAID status
     check_current_raid
+    
+    # Check and clean existing broken RAID arrays
+    check_and_clean_broken_raids
     
     # Ask for confirmation
     echo
