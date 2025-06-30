@@ -35,6 +35,11 @@ configure_caddy() {
     template_file="$(dirname "$0")/../config/Caddyfile.template"
     local caddy_config="$CADDY_CONFIG_DIR/Caddyfile"
     
+    # Ensure log directory exists with proper permissions
+    mkdir -p /var/log/caddy
+    chown -R caddy:caddy /var/log/caddy
+    chmod -R 755 /var/log/caddy
+    
     # Backup existing config if it exists
     backup_file "$caddy_config"
     
@@ -68,27 +73,6 @@ test_caddy_config() {
     fi
 }
 
-# Configure firewall for HTTPS
-configure_firewall() {
-    log "INFO" "Configuring firewall for HTTPS..."
-    
-    # Check if ufw is installed
-    if command -v ufw &> /dev/null; then
-        # Allow HTTP and HTTPS (suppress existing rule messages)
-        ufw allow 80/tcp >/dev/null 2>&1 || true
-        ufw allow 443/tcp >/dev/null 2>&1 || true
-        
-        # Block direct access to Proxmox port from external sources
-        if ! ufw status | grep -q "$PROXMOX_PORT/tcp.*DENY"; then
-            ufw deny from any to any port "$PROXMOX_PORT" >/dev/null 2>&1
-            log "INFO" "Blocked direct access to Proxmox port $PROXMOX_PORT"
-        fi
-        
-        log "INFO" "Firewall configured successfully"
-    else
-        log "WARN" "UFW not installed, skipping firewall configuration"
-    fi
-}
 
 # Start and enable Caddy service
 start_caddy() {
