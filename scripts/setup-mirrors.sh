@@ -9,7 +9,15 @@ set -euo pipefail
 # Error handler
 error_handler() {
     local line_no=$1 error_code=$2
-    echo "ERROR: Script failed at line $line_no with exit code $error_code" >&2
+    log "ERROR" "Script failed at line $line_no with exit code $error_code"
+    log "ERROR" "Last command: ${BASH_COMMAND}"
+    log "ERROR" "This error occurred in the setup-mirrors script"
+    
+    # Show context around the failing line
+    if [[ -f "${BASH_SOURCE[0]}" ]]; then
+        log "DEBUG" "Context around line $line_no:"
+        sed -n "$((line_no-2)),$((line_no+2))p" "${BASH_SOURCE[0]}" | nl -v$((line_no-2)) 2>/dev/null || true
+    fi
     exit "$error_code"
 }
 trap 'error_handler ${LINENO} $?' ERR
@@ -42,9 +50,17 @@ detect_drives() {
         # Check for system usage
         if lsblk "$drive_name" -no MOUNTPOINT | grep -qE "^(/|/boot|/var|/usr|/home)"; then
             drive_status="SYSTEM_DRIVE"
+            log "INFO" "  $drive_name ($size) - $drive_status (skipping)"
+            continue
         # Check for existing ZFS pool membership
         elif is_drive_in_zfs_pool "$drive_name"; then
             drive_status="IN_ZFS_POOL"
+            if [[ "${FORCE_ZFS_DRIVES:-false}" == "true" ]]; then
+                log "INFO" "  $drive_name ($size) - $drive_status (forcing inclusion)"
+            else
+                log "INFO" "  $drive_name ($size) - $drive_status (skipping)"
+                continue
+            fi
         # Check for mounted partitions
         elif lsblk "$drive_name" -no MOUNTPOINT | grep -q "^/"; then
             drive_status="HAS_MOUNTED_PARTITIONS"
@@ -147,7 +163,16 @@ create_zfs_pools() {
     
     for mirror_group in "${MIRROR_GROUPS[@]}"; do
         read -ra drives <<< "$mirror_group"
-        local pool_name="zpool$pool_index"
+        
+        # Generate unique pool name
+        local pool_name
+        while true; do
+            pool_name="zpool$pool_index"
+            if ! zpool list -H "$pool_name" 2>/dev/null | grep -q "^$pool_name"; then
+                break
+            fi
+            ((pool_index++))
+        done
         
         if [[ ${#drives[@]} -eq 2 ]]; then
             log "INFO" "Creating ZFS mirror: ${drives[0]} + ${drives[1]} -> $pool_name"
@@ -201,13 +226,34 @@ create_zfs_pools() {
 create_zfs_mirror() {
     local pool_name="$1" drive1="$2" drive2="$3"
     
-    # Wipe drives if they have existing filesystems
+    log "INFO" "Preparing drives for ZFS mirror..."
+    
+    # Check if drives are already in ZFS pools
     for drive in "$drive1" "$drive2"; do
-        [[ $(lsblk "$drive" -no FSTYPE 2>/dev/null) ]] && wipefs -a "$drive"
+        if is_drive_in_zfs_pool "$drive" && [[ "${FORCE_ZFS_DRIVES:-false}" != "true" ]]; then
+            log "ERROR" "Drive $drive is already in a ZFS pool"
+            return 1
+        fi
+        
+        # Wipe drives if they have existing filesystems (with confirmation for important data)
+        local fstype
+        fstype=$(lsblk "$drive" -no FSTYPE 2>/dev/null || true)
+        if [[ -n "$fstype" ]]; then
+            log "WARN" "Drive $drive has filesystem: $fstype"
+            if [[ "$fstype" =~ ^(ext[234]|xfs|btrfs|ntfs)$ ]]; then
+                log "WARN" "This appears to contain data. Continuing will destroy it."
+                read -p "Wipe $drive? (y/N): " -r confirm
+                [[ "$confirm" =~ ^[Yy]$ ]] || { log "INFO" "Skipping $drive"; return 1; }
+            fi
+            log "INFO" "Wiping filesystem on $drive..."
+            wipefs -a "$drive" || { log "ERROR" "Failed to wipe $drive"; return 1; }
+        fi
     done
     
+    log "INFO" "Creating ZFS mirror pool: $pool_name"
+    
     # Create ZFS mirror with Proxmox-optimized settings
-    zpool create -f \
+    if ! zpool create -f \
         -o ashift=12 \
         -O compression=lz4 \
         -O atime=off \
@@ -217,23 +263,49 @@ create_zfs_mirror() {
         -O normalization=formD \
         -O mountpoint=none \
         -O canmount=off \
-        "$pool_name" mirror "$drive1" "$drive2" || return 1
+        "$pool_name" mirror "$drive1" "$drive2"; then
+        log "ERROR" "Failed to create ZFS mirror $pool_name"
+        return 1
+    fi
     
     # Create VM storage dataset
-    zfs create -o mountpoint="/mnt/pve/$pool_name" -o canmount=on "$pool_name/vmdata" || {
+    if ! zfs create -o mountpoint="/mnt/pve/$pool_name" -o canmount=on "$pool_name/vmdata"; then
         log "WARN" "Failed to create VM dataset, but pool creation succeeded"
-    }
+    fi
     
     log "INFO" "Successfully created ZFS mirror: $pool_name"
+    return 0
 }
 
 # Create single ZFS pool
 create_zfs_single() {
     local pool_name="$1" drive="$2"
     
-    [[ $(lsblk "$drive" -no FSTYPE 2>/dev/null) ]] && wipefs -a "$drive"
+    log "INFO" "Preparing drive for ZFS pool..."
     
-    zpool create -f \
+    # Check if drive is already in ZFS pool
+    if is_drive_in_zfs_pool "$drive" && [[ "${FORCE_ZFS_DRIVES:-false}" != "true" ]]; then
+        log "ERROR" "Drive $drive is already in a ZFS pool"
+        return 1
+    fi
+    
+    # Wipe drive if it has existing filesystem
+    local fstype
+    fstype=$(lsblk "$drive" -no FSTYPE 2>/dev/null || true)
+    if [[ -n "$fstype" ]]; then
+        log "WARN" "Drive $drive has filesystem: $fstype"
+        if [[ "$fstype" =~ ^(ext[234]|xfs|btrfs|ntfs)$ ]]; then
+            log "WARN" "This appears to contain data. Continuing will destroy it."
+            read -p "Wipe $drive? (y/N): " -r confirm
+            [[ "$confirm" =~ ^[Yy]$ ]] || { log "INFO" "Skipping $drive"; return 1; }
+        fi
+        log "INFO" "Wiping filesystem on $drive..."
+        wipefs -a "$drive" || { log "ERROR" "Failed to wipe $drive"; return 1; }
+    fi
+    
+    log "INFO" "Creating ZFS pool: $pool_name"
+    
+    if ! zpool create -f \
         -o ashift=12 \
         -O compression=lz4 \
         -O atime=off \
@@ -243,13 +315,17 @@ create_zfs_single() {
         -O normalization=formD \
         -O mountpoint=none \
         -O canmount=off \
-        "$pool_name" "$drive" || return 1
+        "$pool_name" "$drive"; then
+        log "ERROR" "Failed to create ZFS pool $pool_name"
+        return 1
+    fi
     
-    zfs create -o mountpoint="/mnt/pve/$pool_name" -o canmount=on "$pool_name/vmdata" || {
+    if ! zfs create -o mountpoint="/mnt/pve/$pool_name" -o canmount=on "$pool_name/vmdata"; then
         log "WARN" "Failed to create VM dataset, but pool creation succeeded"
-    }
+    fi
     
     log "INFO" "Successfully created ZFS pool: $pool_name"
+    return 0
 }
 
 # Add ZFS pool to Proxmox storage
@@ -318,13 +394,59 @@ show_final_status() {
 
 # Main execution
 main() {
+    # Parse arguments
+    local force_zfs_drives=false
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --force-zfs-drives)
+                force_zfs_drives=true
+                log "INFO" "Forcing operation on drives already in ZFS pools"
+                shift
+                ;;
+            --help|-h)
+                cat << EOF
+Usage: $0 [OPTIONS]
+
+Set up ZFS mirrors for Proxmox storage.
+
+OPTIONS:
+    --force-zfs-drives    Include drives that are already in ZFS pools
+    --help               Show this help message
+
+EOF
+                exit 0
+                ;;
+            *)
+                log "ERROR" "Unknown option: $1"
+                exit 1
+                ;;
+        esac
+    done
+    
     log "INFO" "Starting streamlined Proxmox ZFS setup..."
     
     # Root check
     [[ $EUID -eq 0 ]] || { log "ERROR" "Must run as root"; exit 1; }
     
+    # Export force option for detect_drives to use
+    export FORCE_ZFS_DRIVES="$force_zfs_drives"
+    
     # Execution flow
     detect_drives
+    
+    # Check if we have any available drives
+    if [[ ${#AVAILABLE_DRIVES[@]} -eq 0 ]]; then
+        log "ERROR" "No available drives found for ZFS mirror creation"
+        log "INFO" "All detected drives are either:"
+        log "INFO" "  - System drives (mounted at /, /boot, etc.)"
+        log "INFO" "  - Already in ZFS pools"
+        log "INFO" "  - Have mounted partitions"
+        log "INFO" ""
+        log "INFO" "If you want to work with drives already in ZFS pools, use:"
+        log "INFO" "  $0 --force-zfs-drives"
+        exit 1
+    fi
+    
     group_drives_by_size
     check_current_storage
     

@@ -30,6 +30,7 @@ COMMANDS:
     --setup-system      Optimize host system for Proxmox and ensure /var/lib/vz partition exists
     --format-drives     Format non-system drives interactively (safe, asks for confirmation)
     --setup-mirrors     Scan drives and configure optimal RAID mirror arrays
+                        Use --force-zfs-drives to include drives already in ZFS pools
     --remove-mirrors    Remove ALL RAID mirror configurations including system mirrors (preserves data on drives)
     --caddy             Install and configure Caddy with HTTPS (current functionality)
     --network           Configure network interfaces for additional Hetzner IPs
@@ -48,6 +49,7 @@ EXAMPLES:
     $0 --setup-system           # Optimize host system for Proxmox and setup /var/lib/vz partition
     $0 --format-drives          # Format non-system drives interactively
     $0 --setup-mirrors          # Scan drives and configure optimal RAID mirror arrays
+    $0 --setup-mirrors --force-zfs-drives  # Include drives already in ZFS pools
     $0 --remove-mirrors         # Remove ALL RAID mirror configurations including system mirrors
     $0 --caddy                  # Install Caddy with current configuration
     $0 --network                # Configure network interfaces for additional IPs
@@ -86,6 +88,7 @@ EOF
 parse_args() {
     local config_file=""
     local command=""
+    declare -a command_args=()
     
     # Parse command first
     if [[ $# -gt 0 ]] && [[ "$1" =~ ^--.* ]]; then
@@ -150,6 +153,16 @@ parse_args() {
                 export LOG_LEVEL="DEBUG"
                 shift
                 ;;
+            --force-zfs-drives)
+                # Special argument for setup-mirrors command
+                if [[ "$command" == "setup-mirrors" ]]; then
+                    command_args+=("$1")
+                else
+                    log "ERROR" "--force-zfs-drives is only valid with --setup-mirrors"
+                    exit 1
+                fi
+                shift
+                ;;
             --caddy|--setup-system|--network|--pfsense|--firewalladmin|--check-mac|--setup-mirrors|--remove-mirrors|--format-drives)
                 # Already handled above
                 shift
@@ -170,6 +183,8 @@ parse_args() {
     fi
     
     export COMMAND="$command"
+    # Export command args by writing to a temp file since arrays can't be exported
+    printf '%s\n' "${command_args[@]}" > "/tmp/install_command_args_$$" 2>/dev/null || true
     
 }
 
@@ -299,6 +314,7 @@ validate_setup() {
 
 run_script() {
     local script="$1"
+    shift # Remove script name, remaining arguments will be passed to the script
     local script_path="$SCRIPT_DIR/$script"
     
     if [[ ! -f "$script_path" ]]; then
@@ -307,7 +323,7 @@ run_script() {
     fi
     
     log "INFO" "Executing: $script"
-    if ! bash "$script_path"; then
+    if ! bash "$script_path" "$@"; then
         log "ERROR" "Failed to execute: $script"
         exit 1
     fi
@@ -453,8 +469,17 @@ run_setup_mirrors() {
     log "INFO" "Starting drive configuration and RAID mirror setup..."
     log "INFO" "Logs are being written to: $LOG_FILE"
     
-    # Run drives setup script
-    run_script "scripts/setup-mirrors.sh"
+    # Read command args from temp file
+    local command_args=()
+    if [[ -f "/tmp/install_command_args_$$" ]]; then
+        while IFS= read -r arg; do
+            command_args+=("$arg")
+        done < "/tmp/install_command_args_$$"
+        rm -f "/tmp/install_command_args_$$"
+    fi
+    
+    # Run drives setup script with any additional arguments
+    run_script "scripts/setup-mirrors.sh" "${command_args[@]}"
     
     log "INFO" "✅ Drive Mirror Configuration Complete!"
     log "INFO" "Drive mirrors have been configured successfully"
