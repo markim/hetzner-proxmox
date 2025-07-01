@@ -454,8 +454,8 @@ create_ariadata_compatible_config() {
     # Try to get CIDR from current IP configuration
     current_cidr=$(ip addr show "$SSH_INTERFACE" | grep "inet " | grep "$CURRENT_IP" | awk '{print $2}' | head -n1)
     if [[ -z "$current_cidr" ]]; then
-        log "WARN" "Could not determine current CIDR, using /24 as fallback"
-        current_cidr="$CURRENT_IP/24"
+        log "WARN" "Could not determine current CIDR, using /26 as fallback for Hetzner"
+        current_cidr="$CURRENT_IP/26"
     fi
     log "DEBUG" "current_cidr: $current_cidr"
     
@@ -553,10 +553,16 @@ EOF
             local gateway="${ADDITIONAL_GATEWAYS_ARRAY[$i]}"
             local netmask="${ADDITIONAL_NETMASKS_ARRAY[$i]}"
             
+            log "DEBUG" "Processing additional IP $((i+1)): ip=$ip, netmask=$netmask, gateway=$gateway"
+            
             # Convert netmask to CIDR
             local cidr
-            cidr=$(netmask_to_cidr "$netmask")
+            if ! cidr=$(netmask_to_cidr "$netmask"); then
+                log "ERROR" "Failed to convert netmask '$netmask' to CIDR"
+                return 1
+            fi
             
+            log "DEBUG" "Converted netmask $netmask to CIDR /$cidr"
             log "INFO" "Adding IP $ip/$cidr with gateway $gateway"
             
             echo "    post-up ip addr add $ip/$cidr dev vmbr0" >> "$temp_config"
@@ -809,6 +815,8 @@ netmask_to_cidr() {
     local netmask="$1"
     local cidr=0
     
+    log "DEBUG" "Converting netmask: $netmask"
+    
     case "$netmask" in
         "255.255.255.255") cidr=32 ;;
         "255.255.255.254") cidr=31 ;;
@@ -833,6 +841,7 @@ netmask_to_cidr() {
             ;;
     esac
     
+    log "DEBUG" "Converted to CIDR: $cidr"
     echo "$cidr"
 }
 
