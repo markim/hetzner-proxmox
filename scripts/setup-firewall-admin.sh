@@ -22,7 +22,7 @@ PFSENSE_DHCP_END="${PFSENSE_DHCP_END:-192.168.1.200}"
 
 # Firewall Admin VM configuration constants
 VM_ISO_URL="https://distro.ibiblio.org/puppylinux/puppy-bookwormpup/BookwormPup64/10.0.11/BookwormPup64_10.0.11.iso"
-VM_ISO_PATH="/var/lib/vz/template/iso/BookwormPup64_10.0.11.iso"
+VM_ISO_PATH="${VM_ISO_PATH:-/var/lib/vz/template/iso/BookwormPup64_10.0.11.iso}"
 FIREWALL_ADMIN_VM_ID="${FIREWALL_ADMIN_VM_ID:-200}"
 FIREWALL_ADMIN_HOSTNAME="${FIREWALL_ADMIN_HOSTNAME:-firewall-admin}"
 FIREWALL_ADMIN_MEMORY="${FIREWALL_ADMIN_MEMORY:-1024}"

@@ -458,8 +458,8 @@ EOF
     
     if [[ ${#missing_tools[@]} -gt 0 ]]; then
         log "ERROR" "Missing required tools: ${missing_tools[*]}"
-        log "ERROR" "Please install the missing packages:"
-        log "ERROR" "  apt update && apt install -y util-linux parted zfsutils-linux"
+        log "ERROR" "Please run system setup first to install all dependencies:"
+        log "ERROR" "  ./install.sh --setup-system"
         exit 1
     fi
     

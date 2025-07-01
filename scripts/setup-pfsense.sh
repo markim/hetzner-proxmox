@@ -15,7 +15,7 @@ load_env "$SCRIPT_DIR/.env"
 
 # pfSense configuration constants
 PFSENSE_ISO_URL="https://atxfiles.netgate.com/mirror/downloads/pfSense-CE-2.7.2-RELEASE-amd64.iso.gz"
-PFSENSE_ISO_PATH="/var/lib/vz/template/iso/pfSense-CE-2.7.2-RELEASE-amd64.iso"
+PFSENSE_ISO_PATH="${PFSENSE_ISO_PATH:-/var/lib/vz/template/iso/pfSense-CE-2.7.2-RELEASE-amd64.iso}"
 PFSENSE_VM_ID="${PFSENSE_VM_ID:-100}"
 PFSENSE_CPU_CORES="${PFSENSE_CPU_CORES:-2}"
 PFSENSE_MEMORY="${PFSENSE_MEMORY:-2048}"

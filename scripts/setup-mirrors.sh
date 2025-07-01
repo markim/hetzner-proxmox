@@ -7,6 +7,12 @@
 # Use proper error handling like format-drives.sh
 set -euo pipefail
 
+# Source dependency validation functions if available
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "$SCRIPT_DIR/setup-system.sh" ]]; then
+    source "$SCRIPT_DIR/setup-system.sh"
+fi
+
 # Custom error handler
 error_handler() {
     local line_no=$1
@@ -257,47 +263,31 @@ check_current_storage() {
     return 0
 }
 
-# Install ZFS if needed
-install_zfs() {
+# Check ZFS availability
+check_zfs_availability() {
     if command -v zpool >/dev/null && command -v zfs >/dev/null; then
-        log "INFO" "ZFS already available"
+        log "INFO" "ZFS tools available"
+        
+        # Try to load ZFS module if not already loaded
+        if ! lsmod | grep -q "^zfs "; then
+            log "INFO" "Loading ZFS module..."
+            set +e
+            modprobe zfs
+            local modprobe_result=$?
+            set -e
+            
+            if [[ $modprobe_result -ne 0 ]]; then
+                log "ERROR" "Failed to load ZFS module"
+                return 1
+            fi
+        fi
+        
         return 0
-    fi
-    
-    log "INFO" "Installing ZFS..."
-    
-    # Temporarily disable strict error handling for package installation
-    set +e
-    apt update
-    local apt_result=$?
-    set -e
-    
-    if [[ $apt_result -ne 0 ]]; then
-        log "WARN" "apt update had some issues, but continuing..."
-    fi
-    
-    set +e
-    apt install -y zfsutils-linux
-    apt_result=$?
-    set -e
-    
-    if [[ $apt_result -ne 0 ]]; then
-        log "ERROR" "Failed to install zfsutils-linux"
+    else
+        log "ERROR" "ZFS tools not found. Please run system setup first:"
+        log "ERROR" "  ./install.sh --setup-system"
         return 1
     fi
-    
-    set +e
-    modprobe zfs
-    local modprobe_result=$?
-    set -e
-    
-    if [[ $modprobe_result -ne 0 ]]; then
-        log "ERROR" "Failed to load ZFS module"
-        return 1
-    fi
-    
-    log "INFO" "ZFS installed successfully"
-    return 0
 }
 
 # Create ZFS pools efficiently (add to existing rpool)
@@ -310,7 +300,7 @@ create_zfs_pools() {
         return 1
     fi
     
-    install_zfs || { log "ERROR" "Failed to install/setup ZFS"; return 1; }
+    check_zfs_availability || { log "ERROR" "Failed to setup ZFS"; return 1; }
     
     # Check if rpool exists
     if ! zpool list -H rpool >/dev/null 2>&1; then
@@ -811,6 +801,29 @@ EOF
     done
     
     log "INFO" "Starting streamlined Proxmox ZFS setup..."
+    
+    # Check system dependencies
+    if command -v check_required_tools >/dev/null 2>&1; then
+        if ! check_required_tools zpool zfs lsblk parted; then
+            log "ERROR" "Required ZFS tools are missing"
+            exit 1
+        fi
+    else
+        log "WARNING" "Dependency validation function not available"
+        # Basic check for critical tools
+        local missing_tools=()
+        for tool in zpool zfs lsblk parted; do
+            if ! command -v "$tool" &> /dev/null; then
+                missing_tools+=("$tool")
+            fi
+        done
+        
+        if [[ ${#missing_tools[@]} -gt 0 ]]; then
+            log "ERROR" "Missing required tools: ${missing_tools[*]}"
+            log "ERROR" "Run './install.sh --setup-system' to install all dependencies"
+            exit 1
+        fi
+    fi
     
     # Root check
     [[ $EUID -eq 0 ]] || { log "ERROR" "Must run as root"; exit 1; }

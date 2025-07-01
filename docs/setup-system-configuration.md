@@ -1,12 +1,14 @@
 # Setup System Configuration Guide
 
-This document describes the configurable paths and environment variables for the `setup-system.sh` script.
+This document describes the configurable paths and environment variables for the Hetzner Proxmox setup scripts.
 
-## Configurable Paths
+## Core System Configuration (setup-system.sh)
 
-The script uses configurable paths that can be overridden by environment variables for maximum portability and customization.
+### Configurable Paths
 
-### Setup and Backup Directories
+The setup-system.sh script uses configurable paths that can be overridden by environment variables for maximum portability and customization.
+
+#### Setup and Backup Directories
 
 | Variable | Default Value | Description |
 |----------|---------------|-------------|
@@ -15,7 +17,7 @@ The script uses configurable paths that can be overridden by environment variabl
 | `ROLLBACK_SCRIPT` | `$SETUP_BASE_DIR/rollback.sh` | Path to rollback script |
 | `SETUP_STATE_FILE` | `$SETUP_BASE_DIR/setup.state` | Setup state tracking file |
 
-### System Configuration Directories
+#### System Configuration Directories
 
 | Variable | Default Value | Description |
 |----------|---------------|-------------|
@@ -25,17 +27,40 @@ The script uses configurable paths that can be overridden by environment variabl
 | `MODPROBE_DIR` | `/etc/modprobe.d` | Directory for kernel module configuration |
 | `MODULES_FILE` | `/etc/modules` | File listing kernel modules to load |
 
-### Command Paths
+#### Command Paths
 
 | Variable | Default Value | Description |
 |----------|---------------|-------------|
 | `ROLLBACK_COMMAND_PATH` | `/usr/local/bin/proxmox-setup-rollback` | Path for rollback command |
 
-### Log Directory
+#### Log Directory
 
 | Variable | Default Value | Description |
 |----------|---------------|-------------|
 | `LOG_DIR` | `/var/log` | Directory for log files |
+
+## Network Configuration (configure-network.sh)
+
+| Variable | Default Value | Description |
+|----------|---------------|-------------|
+| `NETWORK_BACKUP_DIR` | `/root/network-backups` | Directory for network configuration backups |
+| `INTERFACES_FILE` | `/etc/network/interfaces` | Main network interfaces configuration file |
+| `SYSCTL_DIR` | `/etc/sysctl.d` | Directory for sysctl configuration files (pfSense integration) |
+| `MODULES_FILE` | `/etc/modules` | File for loading bridge netfilter module |
+
+## VM Setup Scripts
+
+### pfSense Setup (setup-pfsense.sh)
+
+| Variable | Default Value | Description |
+|----------|---------------|-------------|
+| `PFSENSE_ISO_PATH` | `/var/lib/vz/template/iso/pfSense-CE-2.7.2-RELEASE-amd64.iso` | Path to pfSense ISO file |
+
+### Firewall Admin Setup (setup-firewall-admin.sh)
+
+| Variable | Default Value | Description |
+|----------|---------------|-------------|
+| `VM_ISO_PATH` | `/var/lib/vz/template/iso/BookwormPup64_10.0.11.iso` | Path to Firewall Admin VM ISO file |
 
 ## System Paths (Read-Only)
 

@@ -29,8 +29,8 @@ load_env "$SCRIPT_DIR/.env"
 RESET_TO_ARIADATA=false
 
 # Network configuration safety checks
-NETWORK_BACKUP_DIR="/root/network-backups"
-INTERFACES_FILE="/etc/network/interfaces"
+NETWORK_BACKUP_DIR="${NETWORK_BACKUP_DIR:-/root/network-backups}"
+INTERFACES_FILE="${INTERFACES_FILE:-/etc/network/interfaces}"
 INTERFACES_BACKUP="$NETWORK_BACKUP_DIR/interfaces.backup.$(date +%Y%m%d_%H%M%S)"
 
 # Create backup directory
@@ -1237,7 +1237,7 @@ configure_proxmox_network() {
     log "INFO" "Configuring Proxmox system settings for pfSense integration..."
     
     # Enable IP forwarding and other kernel parameters for pfSense
-    cat > /etc/sysctl.d/99-proxmox-pfsense.conf << EOF
+    cat > "${SYSCTL_DIR:-/etc/sysctl.d}/99-proxmox-pfsense.conf" << EOF
 # Network forwarding for pfSense integration
 net.ipv4.ip_forward=1
 net.ipv6.conf.all.forwarding=1
@@ -1267,10 +1267,10 @@ net.bridge.bridge-nf-call-arptables=0
 EOF
     
     # Apply sysctl settings
-    sysctl -p /etc/sysctl.d/99-proxmox-pfsense.conf
+    sysctl -p "${SYSCTL_DIR:-/etc/sysctl.d}/99-proxmox-pfsense.conf"
     
     # Load bridge netfilter module
-    echo 'br_netfilter' >> /etc/modules
+    echo 'br_netfilter' >> "${MODULES_FILE:-/etc/modules}"
     modprobe br_netfilter 2>/dev/null || true
     
     log "INFO" "Proxmox system configured for pfSense integration"

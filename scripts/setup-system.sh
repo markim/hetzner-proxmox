@@ -108,13 +108,27 @@ optimize_system() {
         log "WARNING" "Package upgrade failed, continuing with current versions"
     fi
     
-    # Install essential packages for Proxmox optimization
-    log "INFO" "Installing system optimization packages..."
+    # Install essential packages for Proxmox optimization and all script dependencies
+    log "INFO" "Installing system optimization packages and dependencies..."
     local packages=(
+        # System optimization packages
         htop iotop sysstat smartmontools lm-sensors ethtool tuned
         irqbalance chrony rsyslog logrotate parted curl
         debian-keyring debian-archive-keyring apt-transport-https gnupg
         zfsutils-linux nvme-cli fio
+        
+        # Dependencies for all scripts
+        util-linux          # provides lsblk, findmnt, wipefs, blkid
+        parted             # disk partitioning tool
+        lvm2               # provides pvs for LVM detection
+        systemd            # provides systemctl (usually already installed)
+        iputils-ping       # provides ping
+        coreutils          # basic system utilities
+        wget               # alternative download tool
+        
+        # Build and development tools (optional but useful)
+        build-essential    # for any compilation needs
+        git               # version control
     )
     
     local failed_packages=()
@@ -1055,6 +1069,52 @@ EOF
     echo
     
     log "INFO" "If you experience issues, run 'proxmox-setup-rollback' to undo changes"
+}
+
+# Function to validate that system dependencies are installed
+# Can be sourced by other scripts to check dependencies
+validate_system_dependencies() {
+    local missing_deps=()
+    local required_packages=(
+        "lvm2" "zfsutils-linux" "pv" "tree" "htop" "iotop" "curl" "wget" 
+        "rsync" "screen" "tmux" "vim" "nano" "less" "unzip" "zip" "dnsutils"
+        "net-tools" "iproute2" "bridge-utils" "vlan" "systemd" "systemd-timesyncd"
+        "logrotate" "cron" "sudo" "openssh-server" "qemu-guest-agent"
+    )
+    
+    for package in "${required_packages[@]}"; do
+        if ! dpkg -s "$package" >/dev/null 2>&1; then
+            missing_deps+=("$package")
+        fi
+    done
+    
+    if [[ ${#missing_deps[@]} -gt 0 ]]; then
+        echo "Missing dependencies: ${missing_deps[*]}"
+        echo "Run './install.sh --setup-system' to install all dependencies"
+        return 1
+    fi
+    
+    return 0
+}
+
+# Function to check if specific tools are available
+# Usage: check_required_tools tool1 tool2 tool3
+check_required_tools() {
+    local missing_tools=()
+    
+    for tool in "$@"; do
+        if ! command -v "$tool" &> /dev/null; then
+            missing_tools+=("$tool")
+        fi
+    done
+    
+    if [[ ${#missing_tools[@]} -gt 0 ]]; then
+        echo "Missing required tools: ${missing_tools[*]}"
+        echo "Run './install.sh --setup-system' to install all dependencies"
+        return 1
+    fi
+    
+    return 0
 }
 
 # Execute main function if script is run directly

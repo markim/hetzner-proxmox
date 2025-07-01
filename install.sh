@@ -215,10 +215,6 @@ validate_setup() {
                 exit 1
             fi
             ;;
-        "network")
-            # Network-specific validation is handled in the network script
-            log "INFO" "Network validation will be performed by configure-network.sh"
-            ;;
         "pfsense")
             # pfSense-specific validation is handled in the pfSense script
             log "INFO" "pfSense validation will be performed by setup-pfsense.sh"
@@ -252,36 +248,73 @@ validate_setup() {
         "format-drives")
             # Drive formatting - check we have the required tools
             log "INFO" "Drive formatting - checking for required tools"
-            if ! command -v lsblk &> /dev/null; then
-                log "ERROR" "lsblk command not found. Required for drive management."
-                exit 1
-            fi
-            if ! command -v parted &> /dev/null; then
-                log "ERROR" "parted command not found. Required for partitioning."
+            local missing_tools=()
+            local required_tools=("lsblk" "parted" "zpool")
+            for tool in "${required_tools[@]}"; do
+                if ! command -v "$tool" &> /dev/null; then
+                    missing_tools+=("$tool")
+                fi
+            done
+            if [[ ${#missing_tools[@]} -gt 0 ]]; then
+                log "ERROR" "Missing required tools: ${missing_tools[*]}"
+                log "ERROR" "Please run system setup first: $0 --setup-system"
                 exit 1
             fi
             ;;
         "setup-mirrors")
             # Drive mirror setup - check we have the required tools
             log "INFO" "Drive mirror setup - checking for required tools"
-            if ! command -v lsblk &> /dev/null; then
-                log "ERROR" "lsblk command not found. Required for drive management."
+            local missing_tools=()
+            local required_tools=("lsblk" "zpool" "zfs")
+            for tool in "${required_tools[@]}"; do
+                if ! command -v "$tool" &> /dev/null; then
+                    missing_tools+=("$tool")
+                fi
+            done
+            if [[ ${#missing_tools[@]} -gt 0 ]]; then
+                log "ERROR" "Missing required tools: ${missing_tools[*]}"
+                log "ERROR" "Please run system setup first: $0 --setup-system"
                 exit 1
             fi
             ;;
         "drives")
             # Drives configuration - check we have the required tools
             log "INFO" "Drive configuration - checking for required tools"
-            if ! command -v lsblk &> /dev/null; then
-                log "ERROR" "lsblk command not found. Required for drive management."
+            local missing_tools=()
+            local required_tools=("lsblk" "zpool")
+            for tool in "${required_tools[@]}"; do
+                if ! command -v "$tool" &> /dev/null; then
+                    missing_tools+=("$tool")
+                fi
+            done
+            if [[ ${#missing_tools[@]} -gt 0 ]]; then
+                log "ERROR" "Missing required tools: ${missing_tools[*]}"
+                log "ERROR" "Please run system setup first: $0 --setup-system"
                 exit 1
             fi
             ;;
         "remove-mirrors")
             # RAID mirror removal - check we have the required tools
             log "INFO" "RAID mirror removal - checking for required tools"
-            if ! command -v findmnt &> /dev/null; then
-                log "ERROR" "findmnt command not found. Required for mount detection."
+            local missing_tools=()
+            local required_tools=("findmnt" "zpool")
+            for tool in "${required_tools[@]}"; do
+                if ! command -v "$tool" &> /dev/null; then
+                    missing_tools+=("$tool")
+                fi
+            done
+            if [[ ${#missing_tools[@]} -gt 0 ]]; then
+                log "ERROR" "Missing required tools: ${missing_tools[*]}"
+                log "ERROR" "Please run system setup first: $0 --setup-system"
+                exit 1
+            fi
+            ;;
+        "network")
+            # Network-specific validation is handled in the network script
+            log "INFO" "Network validation will be performed by configure-network.sh"
+            # Basic connectivity tools check
+            if ! command -v ping &> /dev/null; then
+                log "ERROR" "ping command not found. Please run system setup first: $0 --setup-system"
                 exit 1
             fi
             ;;
