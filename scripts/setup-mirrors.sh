@@ -327,6 +327,8 @@ create_zfs_pools() {
             if ! zpool status rpool | grep -q "$mirror_name"; then
                 break
             fi
+            mirror_index=$((mirror_index + 1))
+        done
         
         if [[ ${#drives[@]} -eq 2 ]]; then
             log "INFO" "Adding ZFS mirror to rpool: ${drives[0]} + ${drives[1]} -> $mirror_name"
@@ -362,11 +364,6 @@ create_zfs_pools() {
             if add_single_to_rpool "$mirror_name" "$drive"; then
                 success_count=$((success_count + 1))
                 log "INFO" "Successfully added single device to rpool: $mirror_name"
-                fi
-            else
-                log "ERROR" "Failed to create ZFS pool: $pool_name"
-                failed_groups+=("$mirror_group")
-            fi
             else
                 log "ERROR" "Failed to add single device to rpool: $mirror_name"
                 failed_groups+=("$mirror_group")
@@ -536,6 +533,93 @@ create_zfs_mirror() {
         local fstype
         fstype=$(lsblk "$drive" -no FSTYPE 2>/dev/null || true)
         if [[ -n "$fstype" ]]; then
+            log "WARN" "Drive $drive has filesystem: $fstype"
+            if [[ "$fstype" =~ ^(ext[234]|xfs|btrfs|ntfs)$ ]]; then
+                log "WARN" "This appears to contain data. Continuing will destroy it."
+                if [[ "$FORCE_YES" == "true" ]]; then
+                    log "INFO" "Auto-confirming drive wipe (non-interactive mode)"
+                    confirm="y"
+                else
+                    read -p "Wipe $drive? (y/N): " -r confirm
+                fi
+                if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+                    log "INFO" "Skipping $drive"
+                    return 1
+                fi
+            fi
+            log "INFO" "Wiping filesystem on $drive..."
+            
+            # Use more resilient wiping
+            set +e
+            wipefs -a "$drive"
+            local wipe_result=$?
+            set -e
+            
+            if [[ $wipe_result -ne 0 ]]; then
+                log "ERROR" "Failed to wipe $drive"
+                return 1
+            fi
+        fi
+    done
+    
+    log "INFO" "Creating ZFS mirror pool: $pool_name"
+    
+    # Create ZFS mirror with Proxmox-optimized settings
+    set +e
+    zpool create -f \
+        -o ashift=12 \
+        -O compression=lz4 \
+        -O atime=off \
+        -O relatime=on \
+        -O xattr=sa \
+        -O dnodesize=auto \
+        -O normalization=formD \
+        "$pool_name" mirror "$drive1" "$drive2"
+    local create_result=$?
+    set -e
+    
+    if [[ $create_result -ne 0 ]]; then
+        log "ERROR" "Failed to create ZFS mirror $pool_name"
+        return 1
+    fi
+    
+    log "INFO" "Successfully created ZFS mirror: $pool_name"
+    return 0
+}
+
+# Create single ZFS pool (legacy function)
+create_zfs_single() {
+    local pool_name="$1" drive="$2"
+    
+    log "INFO" "Preparing drive for ZFS pool..."
+    
+    # Check if drive is already in ZFS pool
+    if is_drive_in_zfs_pool "$drive" && [[ "${FORCE_ZFS_DRIVES:-false}" != "true" ]]; then
+        log "ERROR" "Drive $drive is already in a ZFS pool"
+        return 1
+    fi
+    
+    # Wipe drive if it has existing filesystem
+    local fstype
+    fstype=$(lsblk "$drive" -no FSTYPE 2>/dev/null || true)
+    if [[ -n "$fstype" ]]; then
+        log "WARN" "Drive $drive has filesystem: $fstype"
+        if [[ "$fstype" =~ ^(ext[234]|xfs|btrfs|ntfs)$ ]]; then
+            log "WARN" "This appears to contain data. Continuing will destroy it."
+            if [[ "$FORCE_YES" == "true" ]]; then
+                log "INFO" "Auto-confirming drive wipe (non-interactive mode)"
+                confirm="y"
+            else
+                read -p "Wipe $drive? (y/N): " -r confirm
+            fi
+            if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+                log "INFO" "Skipping $drive"
+                return 1
+            fi
+        fi
+        log "INFO" "Wiping filesystem on $drive..."
+        
+        # Use more resilient wiping
         set +e
         wipefs -a "$drive"
         local wipe_result=$?
