@@ -144,7 +144,7 @@ create_pfsense_vm() {
     # Add SCSI controller and disk
     qm set "$PFSENSE_VM_ID" \
         --scsihw virtio-scsi-pci \
-        --scsi0 "local:$PFSENSE_DISK_SIZE"
+        --scsi0 "local-zfs:$PFSENSE_DISK_SIZE"
     
     # Configure network interfaces
     # WAN interface (vmbr0) - use MAC address if available
