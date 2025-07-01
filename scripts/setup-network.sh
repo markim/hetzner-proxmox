@@ -1253,9 +1253,14 @@ apply_network_config() {
     log "INFO" "Target: $INTERFACES_FILE"
     log "INFO" ""
     log "INFO" "New configuration preview (first 20 lines):"
-    head -20 "$NEW_INTERFACES_CONFIG" | while IFS= read -r line; do
-        log "INFO" "  $line"
-    done
+    if [[ -f "$NEW_INTERFACES_CONFIG" ]]; then
+        head -20 "$NEW_INTERFACES_CONFIG" | while IFS= read -r line; do
+            log "INFO" "  $line"
+        done || true
+    else
+        log "ERROR" "Configuration file not found: $NEW_INTERFACES_CONFIG"
+        return 1
+    fi
     log "INFO" ""
     
     # Create a restoration script
@@ -1391,18 +1396,30 @@ EOF
         
         log "INFO" "=== WAN Bridge (vmbr0) ==="
         if ip addr show vmbr0 >/dev/null 2>&1; then
-            ip addr show vmbr0 2>/dev/null | grep "inet " | while IFS= read -r line; do
-                log "INFO" "  $line"
-            done
+            local wan_addrs
+            wan_addrs=$(ip addr show vmbr0 2>/dev/null | grep "inet " || true)
+            if [[ -n "$wan_addrs" ]]; then
+                echo "$wan_addrs" | while IFS= read -r line; do
+                    log "INFO" "  $line"
+                done
+            else
+                log "INFO" "  No IP addresses configured"
+            fi
         else
             log "INFO" "  vmbr0 not yet active (restart required)"
         fi
         
         log "INFO" "=== LAN Bridge (vmbr1) ==="
         if ip addr show vmbr1 >/dev/null 2>&1; then
-            ip addr show vmbr1 2>/dev/null | grep "inet " | while IFS= read -r line; do
-                log "INFO" "  $line"
-            done
+            local lan_addrs
+            lan_addrs=$(ip addr show vmbr1 2>/dev/null | grep "inet " || true)
+            if [[ -n "$lan_addrs" ]]; then
+                echo "$lan_addrs" | while IFS= read -r line; do
+                    log "INFO" "  $line"
+                done
+            else
+                log "INFO" "  No IP addresses configured"
+            fi
         else
             log "INFO" "  vmbr1 not yet active (restart required)"
         fi
@@ -1410,9 +1427,15 @@ EOF
         log "INFO" "=== DMZ Bridge (vmbr2) ==="
         if ip addr show vmbr2 >/dev/null 2>&1; then
             # Show IP addresses
-            ip addr show vmbr2 2>/dev/null | grep "inet " | while IFS= read -r line; do
-                log "INFO" "  $line"
-            done
+            local dmz_addrs
+            dmz_addrs=$(ip addr show vmbr2 2>/dev/null | grep "inet " || true)
+            if [[ -n "$dmz_addrs" ]]; then
+                echo "$dmz_addrs" | while IFS= read -r line; do
+                    log "INFO" "  $line"
+                done
+            else
+                log "INFO" "  No IP addresses configured"
+            fi
             
             # Check if bridge is up and operational
             if ip link show vmbr2 | grep -q "state UP"; then
@@ -1696,6 +1719,9 @@ ensure_network_configuration() {
     log "INFO" "   vmbr0 (WAN): Connected to internet with additional IPs"
     log "INFO" "   vmbr1 (LAN): 192.168.1.0/24 - pfSense management network"
     log "INFO" "   vmbr2 (DMZ): 10.0.2.0/24 - public-facing services network"
+    
+    # Ensure function always returns success
+    return 0
 }
 
 # Parse command line arguments
@@ -1750,9 +1776,15 @@ show_network_status() {
             log "INFO" "  State: ${bridge_state:-UNKNOWN}"
             
             # Show IP addresses
-            ip addr show "$bridge" 2>/dev/null | grep "inet " | while IFS= read -r line; do
-                log "INFO" "  $line"
-            done
+            local bridge_addrs
+            bridge_addrs=$(ip addr show "$bridge" 2>/dev/null | grep "inet " || true)
+            if [[ -n "$bridge_addrs" ]]; then
+                echo "$bridge_addrs" | while IFS= read -r line; do
+                    log "INFO" "  $line"
+                done
+            else
+                log "INFO" "  No IP addresses"
+            fi
             
             # Show bridge ports if any
             if [[ -d "/sys/class/net/$bridge/brif" ]]; then
@@ -1772,9 +1804,59 @@ show_network_status() {
     
     # Show routing table
     log "INFO" "Default routes:"
-    ip route | grep default | while IFS= read -r line; do
-        log "INFO" "  $line"
-    done
+    local default_routes
+    default_routes=$(ip route | grep default || true)
+    if [[ -n "$default_routes" ]]; then
+        echo "$default_routes" | while IFS= read -r line; do
+            log "INFO" "  $line"
+        done
+    else
+        log "INFO" "  No default routes found"
+    fi
+    
+    # Ensure function always returns success
+    return 0
+}
+
+# Function to verify DMZ interface
+verify_dmz_interface() {
+    log "INFO" "Verifying DMZ interface configuration..."
+    
+    if ! ip link show vmbr2 >/dev/null 2>&1; then
+        log "WARN" "DMZ bridge vmbr2 not found"
+        return 1
+    fi
+    
+    if ! ip addr show vmbr2 | grep -q "10.0.2.1"; then
+        log "WARN" "DMZ bridge vmbr2 missing IP address 10.0.2.1"
+        return 1
+    fi
+    
+    if ! ip link show vmbr2 | grep -q "state UP"; then
+        log "WARN" "DMZ bridge vmbr2 is not in UP state"
+        return 1
+    fi
+    
+    log "INFO" "✓ DMZ interface verification completed successfully"
+    return 0
+}
+
+# Function to get user confirmation
+get_user_confirmation() {
+    local message="$1"
+    
+    echo ""
+    echo "=============================================="
+    echo "$message"
+    echo "=============================================="
+    echo ""
+    echo "⚠️  WARNING: This script will modify network configuration"
+    echo "   - Current SSH connectivity will be preserved"
+    echo "   - A backup will be created automatically"
+    echo "   - Emergency restore script will be generated"
+    echo ""
+    read -p "Press Enter to continue or Ctrl+C to abort..."
+    echo ""
 }
 
 # Main execution block
@@ -1787,6 +1869,8 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     get_ssh_info
     
     if [[ "$RESET_TO_ARIADATA" == "true" ]]; then
+        get_user_confirmation "RESET NETWORK CONFIGURATION TO ARIADATA BASELINE"
+        
         log "INFO" "Resetting network configuration to ariadata pve-install.sh baseline..."
         
         # Create ariadata configuration (without additional IPs)
@@ -1800,6 +1884,8 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
         log "INFO" "Configuration is now compatible with ariadata pve-install.sh"
         log "INFO" "Additional IPs can be added by running without --reset flag"
     else
+        get_user_confirmation "CONFIGURE HETZNER PROXMOX NETWORK WITH ADDITIONAL IPs"
+        
         # Normal execution flow
         log "INFO" "Starting Hetzner Proxmox network configuration..."
         log "INFO" "This script will safely add additional IPs while preserving SSH connectivity"
@@ -1822,7 +1908,11 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
         
         # Verify DMZ interface is properly configured
         log "INFO" "Verifying network configuration..."
-        verify_dmz_interface || log "WARN" "DMZ verification completed with issues"
+        if verify_dmz_interface; then
+            log "INFO" "✓ DMZ verification completed successfully"
+        else
+            log "WARN" "⚠️  DMZ verification completed with issues (this is often normal on first run)"
+        fi
         
         # Show final status
         show_network_status
@@ -1848,4 +1938,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
         log "INFO" "   VM: --net0 virtio,bridge=vmbr2"
         log "INFO" "   Container: --net0 name=eth0,bridge=vmbr2,ip=10.0.2.10/24,gw=10.0.2.1"
     fi
+    
+    # Explicit successful exit
+    exit 0
 fi
