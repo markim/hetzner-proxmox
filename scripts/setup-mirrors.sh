@@ -64,6 +64,12 @@ detect_drives() {
     local mounted_drives=()
     
     while read -r drive_name size; do
+        # Skip ZFS volumes (zvols) - these are virtual disks for VMs
+        if [[ "$drive_name" =~ ^/dev/zd[0-9]+ ]]; then
+            log "INFO" "  $drive_name ($size) - ZFS_VOLUME (VM disk, skipping)"
+            continue
+        fi
+        
         # Check for system usage
         if lsblk "$drive_name" -no MOUNTPOINT | grep -qE "^(/|/boot|/var|/usr|/home)"; then
             log "INFO" "  $drive_name ($size) - SYSTEM_DRIVE (skipping)"
