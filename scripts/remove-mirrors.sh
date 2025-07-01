@@ -4,15 +4,16 @@
 # This script removes ZFS pools and cleans up Proxmox storage configurations
 # Focuses on ZFS-only removal, replacing legacy RAID functionality
 
-set -euo pipefail
+# shellcheck disable=SC2317 # Disable "unreachable code" for error handler
+# Note: We intentionally don't use 'set -e' here to handle errors gracefully
+set -uo pipefail
 
-# Error handler
+# Error handler for unexpected errors only
 error_handler() {
     local line_no=$1 error_code=$2
-    echo "ERROR: Script failed at line $line_no with exit code $error_code" >&2
+    echo "ERROR: Script failed unexpectedly at line $line_no with exit code $error_code" >&2
     exit "$error_code"
 }
-trap 'error_handler ${LINENO} $?' ERR
 
 # Get script directory and source common functions
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,80 +21,92 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 # shellcheck disable=SC1091
 source "$PROJECT_ROOT/lib/common.sh"
 
-# Get all ZFS pools
-get_zfs_pools() {
+# Get ZFS mirrors from rpool
+get_rpool_mirrors() {
     if ! command -v zpool >/dev/null 2>&1; then
         return 0
     fi
     
-    zpool list -H -o name 2>/dev/null || true
+    if ! zpool list -H rpool >/dev/null 2>&1; then
+        return 0
+    fi
+    
+    # Get all mirror vdevs from rpool
+    zpool status rpool | grep -E "^\s+mirror-[0-9]+" | awk '{print $1}' 2>/dev/null || true
 }
 
-# Get ZFS pool details
-get_pool_info() {
-    local pool="$1"
+# Get mirror details from rpool
+get_mirror_info() {
+    local mirror="$1"
     local info=""
     
-    if zpool status "$pool" >/dev/null 2>&1; then
-        local size health
-        size=$(zpool list -H -o size "$pool" 2>/dev/null || echo "unknown")
-        health=$(zpool list -H -o health "$pool" 2>/dev/null || echo "unknown")
-        info="$size, $health"
+    if zpool status rpool >/dev/null 2>&1; then
+        local status health drives
+        status=$(zpool status rpool | grep -A 10 "^\s*$mirror" | grep -E "^\s+/dev/" | awk '{print $1}' | tr '\n' ' ' || echo "unknown")
+        health=$(zpool status rpool | grep -A 1 "^\s*$mirror" | tail -1 | awk '{print $2}' || echo "unknown")
+        drives=$(echo "$status" | wc -w)
+        info="$drives drives ($status), $health"
         
         # Check if used by Proxmox
         local storage_names
-        storage_names=$(pvesm status 2>/dev/null | awk -v pool="$pool" '$3 ~ pool {print $1}' || true)
+        storage_names=$(pvesm status 2>/dev/null | awk '/rpool/ {print $1}' || true)
         [[ -n "$storage_names" ]] && info="$info, Proxmox: $storage_names"
     fi
     
     echo "$info"
 }
 
-# Check if pool is system-critical
-is_system_pool() {
-    local pool="$1"
+# Check if mirror is system-critical
+is_system_mirror() {
+    local mirror="$1"
     
-    # Check if any datasets are mounted on system paths
-    if zfs list -H -o name,mountpoint "$pool" 2>/dev/null | grep -qE '\s(/|/boot|/var|/usr|/home|/root)$'; then
-        return 0
+    # Check if mirror contains system datasets
+    if zfs list -H -o name,mountpoint rpool 2>/dev/null | grep -qE '\s(/|/boot|/var|/usr|/home|/root)$'; then
+        # If rpool has system mounts, check if this is the root mirror
+        if zpool status rpool | grep -A 5 "^\s*$mirror" | grep -q "rpool"; then
+            return 0
+        fi
     fi
     
-    # Check if pool name suggests system usage
-    if [[ "$pool" =~ ^(rpool|bpool|system|root|boot)$ ]]; then
+    # Check if this is the primary mirror (usually mirror-0)
+    if [[ "$mirror" == "mirror-0" ]]; then
         return 0
     fi
     
     return 1
 }
 
-# Remove ZFS pool from Proxmox storage
-remove_from_proxmox() {
-    local pool="$1"
+# Remove ZFS mirror from rpool
+remove_mirror_from_rpool() {
+    local mirror="$1"
     
-    log "INFO" "Removing ZFS pool '$pool' from Proxmox storage..."
+    log "INFO" "Removing ZFS mirror '$mirror' from rpool..."
     
-    # Find all Proxmox storage entries using this pool
-    local storage_entries
-    storage_entries=$(pvesm status 2>/dev/null | awk -v pool="$pool" '$3 ~ pool {print $1}' || true)
+    # Safety check - don't remove system mirrors
+    if is_system_mirror "$mirror"; then
+        log "ERROR" "Cannot remove system mirror '$mirror' - it contains critical system data"
+        return 1
+    fi
     
-    if [[ -n "$storage_entries" ]]; then
-        while read -r storage_name; do
-            [[ -n "$storage_name" ]] || continue
-            log "INFO" "Removing Proxmox storage: $storage_name"
-            
-            # Disable first, then remove
-            if pvesm set "$storage_name" --disable 1 2>/dev/null; then
-                log "DEBUG" "Disabled storage: $storage_name"
-            fi
-            
-            if pvesm remove "$storage_name" 2>/dev/null; then
-                log "INFO" "Removed storage: $storage_name"
-            else
-                log "WARN" "Failed to remove storage: $storage_name"
-            fi
-        done <<< "$storage_entries"
+    # Get devices in the mirror before removal
+    local devices
+    devices=$(zpool status rpool | grep -A 10 "^\s*$mirror" | grep -E "^\s+/dev/" | awk '{print $1}' | tr '\n' ' ')
+    
+    log "INFO" "Mirror '$mirror' contains devices: $devices"
+    
+    # Remove the mirror from rpool
+    if zpool remove rpool "$mirror" 2>/dev/null; then
+        log "INFO" "Successfully removed mirror '$mirror' from rpool"
+        
+        # Clean the devices that were in the mirror
+        for device in $devices; do
+            [[ -n "$device" ]] && clean_drive "$device"
+        done
+        
+        return 0
     else
-        log "DEBUG" "No Proxmox storage entries found for pool: $pool"
+        log "ERROR" "Failed to remove mirror '$mirror' from rpool"
+        return 1
     fi
 }
 
@@ -111,6 +124,7 @@ destroy_zfs_pool() {
     fi
     
     # Import and destroy
+    local success=false
     if zpool import "$pool" 2>/dev/null; then
         log "DEBUG" "Re-imported pool: $pool"
         
@@ -118,18 +132,22 @@ destroy_zfs_pool() {
         if [[ "$force" == "true" ]]; then
             if zpool destroy -f "$pool" 2>/dev/null; then
                 log "INFO" "Force destroyed pool: $pool"
-                return 0
+                success=true
             fi
         else
             if zpool destroy "$pool" 2>/dev/null; then
                 log "INFO" "Destroyed pool: $pool"
-                return 0
+                success=true
             fi
         fi
     fi
     
-    log "ERROR" "Failed to destroy pool: $pool"
-    return 1
+    if [[ "$success" == "true" ]]; then
+        return 0
+    else
+        log "ERROR" "Failed to destroy pool: $pool"
+        return 1
+    fi
 }
 
 # Clean drive after pool removal
@@ -172,73 +190,78 @@ show_zfs_status() {
         return 0
     fi
     
-    local pools
-    pools=$(get_zfs_pools)
-    
-    if [[ -z "$pools" ]]; then
-        log "INFO" "No ZFS pools found"
+    if ! zpool list -H rpool >/dev/null 2>&1; then
+        log "INFO" "rpool not found"
         return 0
     fi
     
-    log "INFO" "ZFS Pools:"
-    zpool list 2>/dev/null || true
+    log "INFO" "rpool Status:"
+    zpool list rpool 2>/dev/null || true
     echo
     
-    log "INFO" "Pool Details:"
-    while read -r pool; do
-        [[ -n "$pool" ]] || continue
+    log "INFO" "rpool Mirrors:"
+    local mirrors
+    mirrors=$(get_rpool_mirrors)
+    
+    if [[ -z "$mirrors" ]]; then
+        log "INFO" "  No mirrors found in rpool"
+        return 0
+    fi
+    
+    while read -r mirror; do
+        [[ -n "$mirror" ]] || continue
         local info
-        info=$(get_pool_info "$pool")
+        info=$(get_mirror_info "$mirror")
         local system_marker=""
-        is_system_pool "$pool" && system_marker=" ⚠️ SYSTEM"
-        log "INFO" "  $pool: $info$system_marker"
-    done <<< "$pools"
+        is_system_mirror "$mirror" && system_marker=" ⚠️ SYSTEM"
+        log "INFO" "  $mirror: $info$system_marker"
+    done <<< "$mirrors"
     
     echo
-    log "INFO" "Proxmox Storage using ZFS:"
-    pvesm status 2>/dev/null | grep -E "(zfs|Type)" || log "INFO" "No ZFS storage in Proxmox"
+    log "INFO" "Proxmox Storage using rpool:"
+    pvesm status 2>/dev/null | grep -E "(rpool|Type)" || log "INFO" "No rpool storage in Proxmox"
 }
 
-# Interactive pool selection
-interactive_pool_selection() {
-    local pools
-    pools=$(get_zfs_pools)
+# Interactive mirror selection
+interactive_mirror_selection() {
+    local mirrors
+    mirrors=$(get_rpool_mirrors)
     
-    if [[ -z "$pools" ]]; then
-        log "INFO" "No ZFS pools found to remove"
+    if [[ -z "$mirrors" ]]; then
+        log "INFO" "No ZFS mirrors found in rpool to remove"
         return 0
     fi
     
-    log "INFO" "=== INTERACTIVE ZFS POOL REMOVAL ==="
-    log "INFO" "Select pools to remove (data will be permanently lost!)"
+    log "INFO" "=== INTERACTIVE ZFS MIRROR REMOVAL ==="
+    log "INFO" "Select mirrors to remove from rpool (data will be permanently lost!)"
     echo
     
-    declare -a selected_pools=()
-    local pool_array=()
+    declare -a selected_mirrors=()
+    local mirror_array=()
     
     # Build array and show options
-    while read -r pool; do
-        [[ -n "$pool" ]] || continue
-        pool_array+=("$pool")
-    done <<< "$pools"
+    while read -r mirror; do
+        [[ -n "$mirror" ]] || continue
+        mirror_array+=("$mirror")
+    done <<< "$mirrors"
     
-    for i in "${!pool_array[@]}"; do
-        local pool="${pool_array[i]}"
+    for i in "${!mirror_array[@]}"; do
+        local mirror="${mirror_array[i]}"
         local info
-        info=$(get_pool_info "$pool")
+        info=$(get_mirror_info "$mirror")
         local system_marker=""
-        is_system_pool "$pool" && system_marker=" ⚠️ SYSTEM"
-        echo "$((i+1)). $pool ($info)$system_marker"
+        is_system_mirror "$mirror" && system_marker=" ⚠️ SYSTEM"
+        echo "$((i+1)). $mirror ($info)$system_marker"
     done
     
     echo
-    echo "0. Remove ALL non-system pools"
-    echo "a. Remove ALL pools (including system) - DANGEROUS"
+    echo "0. Remove ALL non-system mirrors"
+    echo "a. Remove ALL mirrors (including system) - DANGEROUS"
     echo "q. Quit without changes"
     echo
     
     while true; do
-        read -p "Select pools to remove (e.g., 1,3 or 0 or a): " -r selection
+        read -p "Select mirrors to remove (e.g., 1,3 or 0 or a): " -r selection
         
         case "$selection" in
             q|Q)
@@ -246,20 +269,20 @@ interactive_pool_selection() {
                 return 0
                 ;;
             0)
-                # Remove all non-system pools
-                for pool in "${pool_array[@]}"; do
-                    if ! is_system_pool "$pool"; then
-                        selected_pools+=("$pool")
+                # Remove all non-system mirrors
+                for mirror in "${mirror_array[@]}"; do
+                    if ! is_system_mirror "$mirror"; then
+                        selected_mirrors+=("$mirror")
                     fi
                 done
                 break
                 ;;
             a|A)
-                # Remove ALL pools (dangerous)
-                log "WARN" "⚠️ WARNING: This will remove ALL ZFS pools including system pools!"
+                # Remove ALL mirrors (dangerous)
+                log "WARN" "⚠️ WARNING: This will remove ALL ZFS mirrors including system mirrors!"
                 read -p "Are you absolutely sure? Type 'YES' to confirm: " -r confirm
                 if [[ "$confirm" == "YES" ]]; then
-                    selected_pools=("${pool_array[@]}")
+                    selected_mirrors=("${mirror_array[@]}")
                     break
                 else
                     log "INFO" "Operation cancelled"
@@ -268,14 +291,14 @@ interactive_pool_selection() {
                 ;;
             *)
                 # Parse comma-separated numbers
-                selected_pools=()
+                selected_mirrors=()
                 IFS=',' read -ra selections <<< "$selection"
                 local valid=true
                 
                 for sel in "${selections[@]}"; do
-                    if [[ "$sel" =~ ^[0-9]+$ ]] && [[ $sel -ge 1 ]] && [[ $sel -le ${#pool_array[@]} ]]; then
+                    if [[ "$sel" =~ ^[0-9]+$ ]] && [[ $sel -ge 1 ]] && [[ $sel -le ${#mirror_array[@]} ]]; then
                         local idx=$((sel-1))
-                        selected_pools+=("${pool_array[idx]}")
+                        selected_mirrors+=("${mirror_array[idx]}")
                     else
                         log "ERROR" "Invalid selection: $sel"
                         valid=false
@@ -283,31 +306,31 @@ interactive_pool_selection() {
                     fi
                 done
                 
-                if [[ "$valid" == "true" ]] && [[ ${#selected_pools[@]} -gt 0 ]]; then
+                if [[ "$valid" == "true" ]] && [[ ${#selected_mirrors[@]} -gt 0 ]]; then
                     break
                 fi
                 ;;
         esac
     done
     
-    if [[ ${#selected_pools[@]} -eq 0 ]]; then
-        log "INFO" "No pools selected for removal"
+    if [[ ${#selected_mirrors[@]} -eq 0 ]]; then
+        log "INFO" "No mirrors selected for removal"
         return 0
     fi
     
-    # Show selected pools and confirm
+    # Show selected mirrors and confirm
     echo
-    log "INFO" "Selected pools for removal:"
-    for pool in "${selected_pools[@]}"; do
+    log "INFO" "Selected mirrors for removal:"
+    for mirror in "${selected_mirrors[@]}"; do
         local info
-        info=$(get_pool_info "$pool")
+        info=$(get_mirror_info "$mirror")
         local system_marker=""
-        is_system_pool "$pool" && system_marker=" ⚠️ SYSTEM"
-        log "WARN" "  $pool ($info)$system_marker"
+        is_system_mirror "$mirror" && system_marker=" ⚠️ SYSTEM"
+        log "WARN" "  $mirror ($info)$system_marker"
     done
     
     echo
-    log "WARN" "⚠️ This will permanently destroy all data in these pools!"
+    log "WARN" "⚠️ This will permanently destroy all data in these mirrors!"
     read -p "Continue with removal? (y/N): " -r confirm
     
     if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
@@ -315,79 +338,75 @@ interactive_pool_selection() {
         return 0
     fi
     
-    # Remove selected pools
-    remove_selected_pools "${selected_pools[@]}"
+    # Remove selected mirrors
+    if remove_selected_mirrors "${selected_mirrors[@]}"; then
+        return 0
+    else
+        return 1
+    fi
 }
 
-# Remove selected pools
-remove_selected_pools() {
-    local pools=("$@")
+# Remove selected mirrors
+remove_selected_mirrors() {
+    local mirrors=("$@")
     local success_count=0
-    local failed_pools=()
+    local failed_mirrors=()
     
-    log "INFO" "Removing ${#pools[@]} ZFS pool(s)..."
+    log "INFO" "Removing ${#mirrors[@]} ZFS mirror(s) from rpool..."
     
-    for pool in "${pools[@]}"; do
-        log "INFO" "Processing pool: $pool"
+    for mirror in "${mirrors[@]}"; do
+        log "INFO" "Processing mirror: $mirror"
         
-        # Get drives before removal for cleanup
-        local drives
-        drives=$(get_pool_drives "$pool" 2>/dev/null || true)
-        
-        # Remove from Proxmox first
-        remove_from_proxmox "$pool"
-        
-        # Destroy the pool
-        if destroy_zfs_pool "$pool" "false"; then
-            log "INFO" "✅ Successfully removed pool: $pool"
-            
-            # Clean drives
-            if [[ -n "$drives" ]]; then
-                while read -r drive; do
-                    [[ -n "$drive" ]] && clean_drive "$drive"
-                done <<< "$drives"
-            fi
-            
+        # Remove the mirror from rpool
+        if remove_mirror_from_rpool "$mirror"; then
+            log "INFO" "✅ Successfully removed mirror: $mirror"
             ((success_count++))
         else
-            log "ERROR" "❌ Failed to remove pool: $pool"
-            failed_pools+=("$pool")
+            log "ERROR" "❌ Failed to remove mirror: $mirror"
+            failed_mirrors+=("$mirror")
         fi
     done
     
     # Report results
-    log "INFO" "Pool removal completed: $success_count successful, ${#failed_pools[@]} failed"
-    [[ ${#failed_pools[@]} -gt 0 ]] && {
-        log "WARN" "Failed pools: ${failed_pools[*]}"
-    }
+    log "INFO" "Mirror removal completed: $success_count successful, ${#failed_mirrors[@]} failed"
+    if [[ ${#failed_mirrors[@]} -gt 0 ]]; then
+        log "WARN" "Failed mirrors: ${failed_mirrors[*]}"
+        return 1
+    fi
+    
+    return 0
 }
 
-# Remove all pools (force mode)
-remove_all_pools() {
+# Remove all mirrors (force mode)
+remove_all_mirrors() {
     local force="$1"
-    local pools
-    pools=$(get_zfs_pools)
+    local mirrors
+    mirrors=$(get_rpool_mirrors)
     
-    if [[ -z "$pools" ]]; then
-        log "INFO" "No ZFS pools found to remove"
+    if [[ -z "$mirrors" ]]; then
+        log "INFO" "No ZFS mirrors found in rpool to remove"
         return 0
     fi
     
-    log "WARN" "Force mode: Removing ALL ZFS pools"
+    log "WARN" "Force mode: Removing ALL ZFS mirrors from rpool"
     
     if [[ "$force" != "true" ]]; then
         echo
-        log "WARN" "⚠️ This will permanently destroy ALL ZFS pools and data!"
+        log "WARN" "⚠️ This will permanently destroy ALL ZFS mirrors in rpool!"
         read -p "Continue? (y/N): " -r confirm
         [[ ! "$confirm" =~ ^[Yy]$ ]] && { log "INFO" "Cancelled"; return 0; }
     fi
     
-    declare -a pool_array=()
-    while read -r pool; do
-        [[ -n "$pool" ]] && pool_array+=("$pool")
-    done <<< "$pools"
+    declare -a mirror_array=()
+    while read -r mirror; do
+        [[ -n "$mirror" ]] && mirror_array+=("$mirror")
+    done <<< "$mirrors"
     
-    remove_selected_pools "${pool_array[@]}"
+    if remove_selected_mirrors "${mirror_array[@]}"; then
+        return 0
+    else
+        return 1
+    fi
 }
 
 # Show help
@@ -395,28 +414,28 @@ show_help() {
     cat << 'EOF'
 Usage: remove-mirrors.sh [OPTIONS]
 
-Remove ZFS pools and clean up Proxmox storage configurations.
+Remove ZFS mirrors from the rpool and clean up associated storage.
 
 OPTIONS:
-    --interactive, -i    Select specific pools to remove (default)
-    --force             Remove ALL pools without confirmation
+    --interactive, -i    Select specific mirrors to remove (default)
+    --force             Remove ALL mirrors without confirmation
     --status            Show current ZFS status and exit
     --help, -h          Show this help message
 
 EXAMPLES:
-    remove-mirrors.sh                    # Interactive pool selection
-    remove-mirrors.sh --status           # Show current ZFS pools
-    remove-mirrors.sh --force            # Remove ALL pools (dangerous)
+    remove-mirrors.sh                    # Interactive mirror selection
+    remove-mirrors.sh --status           # Show current ZFS mirrors
+    remove-mirrors.sh --force            # Remove ALL mirrors (dangerous)
 
 SAFETY:
-    - Interactive mode allows selective pool removal
-    - Force mode removes ALL pools including system pools
-    - Data is permanently destroyed when pools are removed
-    - Proxmox storage configurations are automatically cleaned up
+    - Interactive mode allows selective mirror removal
+    - Force mode removes ALL mirrors including system mirrors
+    - Data is permanently destroyed when mirrors are removed
+    - System mirrors (mirror-0) are protected by default
     - Drives are wiped clean for reuse
 
 WARNING:
-    Removing system pools can make your system unbootable!
+    Removing system mirrors can make your system unbootable!
     Always backup important data before running this script.
 EOF
 }
@@ -468,23 +487,32 @@ main() {
     echo
     
     # Execute based on mode
+    local exit_code=0
     if [[ "$force" == "true" ]]; then
-        remove_all_pools "true"
+        if ! remove_all_pools "true"; then
+            exit_code=1
+        fi
     else
-        interactive_pool_selection
+        if ! interactive_pool_selection; then
+            exit_code=1
+        fi
     fi
     
     echo
     show_zfs_status
     
-    log "INFO" "✅ ZFS pool removal completed!"
-    log "INFO" ""
-    log "INFO" "Next steps:"
-    log "INFO" "1. Run: ./install.sh --setup-mirrors  # To reconfigure drives"
-    log "INFO" "2. Verify: zpool list                 # Check final ZFS status"
+    if [[ $exit_code -eq 0 ]]; then
+        log "INFO" "✅ ZFS pool removal completed!"
+        log "INFO" ""
+        log "INFO" "Next steps:"
+        log "INFO" "1. Run: ./install.sh --setup-mirrors  # To reconfigure drives"
+        log "INFO" "2. Verify: zpool list                 # Check final ZFS status"
+    else
+        log "ERROR" "❌ ZFS pool removal completed with errors!"
+    fi
     
-    # Explicitly exit with success code
-    exit 0
+    # Explicitly exit with the determined code
+    exit $exit_code
 }
 
 # Execute main function if script is run directly

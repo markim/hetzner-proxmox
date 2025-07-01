@@ -398,9 +398,9 @@ EOF
     # Show generated config for debugging
     if [[ "${LOG_LEVEL:-INFO}" == "DEBUG" ]]; then
         log "DEBUG" "Generated configuration content:"
-        cat "$temp_config" | while IFS= read -r line; do
+        while IFS= read -r line; do
             log "DEBUG" "  $line"
-        done
+        done < "$temp_config"
     fi
     
     if ! grep -q "$CURRENT_IP" "$temp_config"; then

@@ -294,9 +294,9 @@ install_zfs() {
     return 0
 }
 
-# Create ZFS pools efficiently
+# Create ZFS pools efficiently (add to existing rpool)
 create_zfs_pools() {
-    log "INFO" "Creating ZFS pools..."
+    log "INFO" "Adding ZFS mirrors to existing rpool..."
     
     # Check if we have any mirror groups
     if [[ ${#MIRROR_GROUPS[@]} -eq 0 ]]; then
@@ -306,101 +306,99 @@ create_zfs_pools() {
     
     install_zfs || { log "ERROR" "Failed to install/setup ZFS"; return 1; }
     
-    local pool_index=0 success_count=0
+    # Check if rpool exists
+    if ! zpool list -H rpool >/dev/null 2>&1; then
+        log "ERROR" "rpool does not exist. Cannot add mirrors to non-existent pool."
+        log "INFO" "Please create rpool first or run the script in standalone mode"
+        return 1
+    fi
+    
+    local success_count=0
     declare -a failed_groups=()
     
     for mirror_group in "${MIRROR_GROUPS[@]}"; do
         read -ra drives <<< "$mirror_group"
         
-        # Generate unique pool name
-        local pool_name
+        # Generate unique mirror name within rpool
+        local mirror_name
+        local mirror_index=1
         while true; do
-            pool_name="zpool$pool_index"
-            if ! zpool list -H "$pool_name" 2>/dev/null | grep -q "^$pool_name"; then
+            mirror_name="mirror-$mirror_index"
+            if ! zpool status rpool | grep -q "$mirror_name"; then
                 break
             fi
-            pool_index=$((pool_index + 1))
-        done
         
         if [[ ${#drives[@]} -eq 2 ]]; then
-            log "INFO" "Creating ZFS mirror: ${drives[0]} + ${drives[1]} -> $pool_name"
+            log "INFO" "Adding ZFS mirror to rpool: ${drives[0]} + ${drives[1]} -> $mirror_name"
             
             # Handle system drives carefully
             if is_system_drive "${drives[0]}" || is_system_drive "${drives[1]}"; then
                 if ! confirm_system_mirror "${drives[@]}"; then
                     log "INFO" "Skipping system drive mirror"
                     failed_groups+=("$mirror_group")
-                    pool_index=$((pool_index + 1))
                     continue
                 fi
             fi
             
-            if create_zfs_mirror "$pool_name" "${drives[0]}" "${drives[1]}"; then
-                if add_to_proxmox_storage "$pool_name" "zfs-mirror-$pool_index"; then
-                    success_count=$((success_count + 1))
-                    log "INFO" "Successfully created and added mirror: $pool_name"
-                else
-                    log "WARN" "Mirror created but failed to add to Proxmox storage"
-                    success_count=$((success_count + 1))  # Still count as success since pool was created
-                fi
+            if add_mirror_to_rpool "$mirror_name" "${drives[0]}" "${drives[1]}"; then
+                success_count=$((success_count + 1))
+                log "INFO" "Successfully added mirror to rpool: $mirror_name"
             else
-                log "ERROR" "Failed to create ZFS mirror: $pool_name"
+                log "ERROR" "Failed to add mirror to rpool: $mirror_name"
                 failed_groups+=("$mirror_group")
             fi
             
         elif [[ ${#drives[@]} -eq 1 ]]; then
-            # Single drive
+            # Single drive - add as a mirror (can be expanded later)
             local drive="${drives[0]}"
-            log "INFO" "Creating single ZFS pool: $drive -> $pool_name"
+            log "INFO" "Adding single ZFS device to rpool: $drive -> $mirror_name"
             
             if is_system_drive "$drive"; then
                 log "INFO" "Skipping single system drive: $drive"
                 failed_groups+=("$mirror_group")
-                pool_index=$((pool_index + 1))
                 continue
             fi
             
-            if create_zfs_single "$pool_name" "$drive"; then
-                if add_to_proxmox_storage "$pool_name" "zfs-single-$pool_index"; then
-                    success_count=$((success_count + 1))
-                    log "INFO" "Successfully created and added single pool: $pool_name"
-                else
-                    log "WARN" "Pool created but failed to add to Proxmox storage"
-                    success_count=$((success_count + 1))  # Still count as success since pool was created
+            if add_single_to_rpool "$mirror_name" "$drive"; then
+                success_count=$((success_count + 1))
+                log "INFO" "Successfully added single device to rpool: $mirror_name"
                 fi
             else
                 log "ERROR" "Failed to create ZFS pool: $pool_name"
                 failed_groups+=("$mirror_group")
             fi
+            else
+                log "ERROR" "Failed to add single device to rpool: $mirror_name"
+                failed_groups+=("$mirror_group")
+            fi
+            
         else
             log "ERROR" "Invalid drive count in mirror group: ${#drives[@]} drives"
             failed_groups+=("$mirror_group")
         fi
-        
-        pool_index=$((pool_index + 1))
     done
     
     # Report results
-    log "INFO" "ZFS creation completed: $success_count successful, ${#failed_groups[@]} failed"
+    log "INFO" "ZFS mirror addition completed: $success_count successful, ${#failed_groups[@]} failed"
     if [[ ${#failed_groups[@]} -gt 0 ]]; then
         log "WARN" "Failed groups: ${failed_groups[*]}"
-        log "WARN" "Some storage pools could not be created"
+        log "WARN" "Some mirrors could not be added to rpool"
     fi
     
     if [[ $success_count -eq 0 ]]; then
-        log "ERROR" "No storage pools were created successfully"
+        log "ERROR" "No mirrors were added to rpool successfully"
         return 1
     fi
     
-    log "INFO" "Successfully created $success_count storage pool(s)"
+    log "INFO" "Successfully added $success_count mirror(s) to rpool"
     return 0
 }
 
-# Create ZFS mirror with optimal settings
-create_zfs_mirror() {
-    local pool_name="$1" drive1="$2" drive2="$3"
+# Add ZFS mirror to existing rpool
+add_mirror_to_rpool() {
+    local mirror_name="$1" drive1="$2" drive2="$3"
     
-    log "INFO" "Preparing drives for ZFS mirror..."
+    log "INFO" "Preparing drives for adding mirror to rpool..."
     
     # Check if drives are already in ZFS pools
     for drive in "$drive1" "$drive2"; do
@@ -442,36 +440,28 @@ create_zfs_mirror() {
         fi
     done
     
-    log "INFO" "Creating ZFS mirror pool: $pool_name"
+    log "INFO" "Adding mirror to rpool: $mirror_name"
     
-    # Create ZFS mirror with Proxmox-optimized settings
+    # Add mirror to existing rpool
     set +e
-    zpool create -f \
-        -o ashift=12 \
-        -O compression=lz4 \
-        -O atime=off \
-        -O relatime=on \
-        -O xattr=sa \
-        -O dnodesize=auto \
-        -O normalization=formD \
-        "$pool_name" mirror "$drive1" "$drive2"
-    local create_result=$?
+    zpool add rpool "$mirror_name" mirror "$drive1" "$drive2"
+    local add_result=$?
     set -e
     
-    if [[ $create_result -ne 0 ]]; then
-        log "ERROR" "Failed to create ZFS mirror $pool_name"
+    if [[ $add_result -ne 0 ]]; then
+        log "ERROR" "Failed to add mirror $mirror_name to rpool"
         return 1
     fi
     
-    log "INFO" "Successfully created ZFS mirror: $pool_name"
+    log "INFO" "Successfully added mirror to rpool: $mirror_name"
     return 0
 }
 
-# Create single ZFS pool
-create_zfs_single() {
-    local pool_name="$1" drive="$2"
+# Add single device to existing rpool (as future mirror)
+add_single_to_rpool() {
+    local mirror_name="$1" drive="$2"
     
-    log "INFO" "Preparing drive for ZFS pool..."
+    log "INFO" "Preparing drive for adding to rpool..."
     
     # Check if drive is already in ZFS pool
     if is_drive_in_zfs_pool "$drive" && [[ "${FORCE_ZFS_DRIVES:-false}" != "true" ]]; then
@@ -500,6 +490,52 @@ create_zfs_single() {
         log "INFO" "Wiping filesystem on $drive..."
         
         # Use more resilient wiping
+        set +e
+        wipefs -a "$drive"
+        local wipe_result=$?
+        set -e
+        
+        if [[ $wipe_result -ne 0 ]]; then
+            log "ERROR" "Failed to wipe $drive"
+            return 1
+        fi
+    fi
+    
+    log "INFO" "Adding single device to rpool: $mirror_name"
+    
+    # Add single device to existing rpool
+    set +e
+    zpool add rpool "$drive"
+    local add_result=$?
+    set -e
+    
+    if [[ $add_result -ne 0 ]]; then
+        log "ERROR" "Failed to add device $drive to rpool"
+        return 1
+    fi
+    
+    log "INFO" "Successfully added device to rpool: $drive"
+    return 0
+}
+
+# Legacy functions kept for compatibility but modified to work with rpool
+# Create ZFS mirror with optimal settings (kept for reference, not used with rpool)
+create_zfs_mirror() {
+    local pool_name="$1" drive1="$2" drive2="$3"
+    
+    log "INFO" "Preparing drives for ZFS mirror..."
+    
+    # Check if drives are already in ZFS pools
+    for drive in "$drive1" "$drive2"; do
+        if is_drive_in_zfs_pool "$drive" && [[ "${FORCE_ZFS_DRIVES:-false}" != "true" ]]; then
+            log "ERROR" "Drive $drive is already in a ZFS pool"
+            return 1
+        fi
+        
+        # Wipe drives if they have existing filesystems (with confirmation for important data)
+        local fstype
+        fstype=$(lsblk "$drive" -no FSTYPE 2>/dev/null || true)
+        if [[ -n "$fstype" ]]; then
         set +e
         wipefs -a "$drive"
         local wipe_result=$?
