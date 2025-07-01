@@ -437,6 +437,10 @@ create_network_config() {
 # Create ariadata-compatible configuration with additional IPs
 create_ariadata_compatible_config() {
     log "INFO" "Creating ariadata-compatible network configuration with additional IPs..."
+    log "DEBUG" "Function start - checking variables"
+    log "DEBUG" "SSH_INTERFACE: ${SSH_INTERFACE:-unset}"
+    log "DEBUG" "CURRENT_IP: ${CURRENT_IP:-unset}"
+    log "DEBUG" "PHYSICAL_INTERFACE: ${PHYSICAL_INTERFACE:-unset}"
     
     local temp_config="/tmp/interfaces.ariadata_with_ips"
     
@@ -446,30 +450,36 @@ create_ariadata_compatible_config() {
     local current_mac=""
     local current_ipv6=""
     
+    log "DEBUG" "Getting CIDR from interface $SSH_INTERFACE for IP $CURRENT_IP"
     # Try to get CIDR from current IP configuration
     current_cidr=$(ip addr show "$SSH_INTERFACE" | grep "inet " | grep "$CURRENT_IP" | awk '{print $2}' | head -n1)
     if [[ -z "$current_cidr" ]]; then
         log "WARN" "Could not determine current CIDR, using /24 as fallback"
         current_cidr="$CURRENT_IP/24"
     fi
+    log "DEBUG" "current_cidr: $current_cidr"
     
     # Get current gateway
+    log "DEBUG" "Getting gateway"
     current_gateway=$(ip route | grep default | awk '{print $3}' | head -n1)
     if [[ -z "$current_gateway" ]]; then
         log "ERROR" "Could not determine current gateway"
         return 1
     fi
+    log "DEBUG" "current_gateway: $current_gateway"
     
     # Get MAC address of the physical interface
     local interface_for_mac="${PHYSICAL_INTERFACE:-$SSH_INTERFACE}"
     if [[ "$SSH_INTERFACE" == "vmbr0" ]]; then
         interface_for_mac="${PHYSICAL_INTERFACE}"
     fi
+    log "DEBUG" "Getting MAC for interface: $interface_for_mac"
     current_mac=$(ip link show "$interface_for_mac" | awk '/ether/ {print $2}')
     if [[ -z "$current_mac" ]]; then
         log "ERROR" "Could not determine MAC address for interface $interface_for_mac"
         return 1
     fi
+    log "DEBUG" "current_mac: $current_mac"
     
     # Get IPv6 address if available
     current_ipv6=$(ip addr show "$SSH_INTERFACE" | grep "inet6.*global" | awk '{print $2}' | head -n1)
