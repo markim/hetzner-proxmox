@@ -33,6 +33,7 @@ COMMANDS:
     --remove-mirrors    Remove ALL RAID mirror configurations including system mirrors (preserves data on drives)
     --caddy             Install and configure Caddy with HTTPS (current functionality)
     --network           Configure network interfaces for additional Hetzner IPs
+    --network --reset   Reset network configuration to base ariadata pve-install.sh configuration
     --pfsense           Create and configure pfSense firewall VM (requires --network first)
     --firewalladmin     Create Fedora container for firewall administration (requires --pfsense first)
     --check-mac         Verify MAC address configuration for additional IPs
@@ -51,6 +52,7 @@ EXAMPLES:
     $0 --remove-mirrors         # Remove ALL RAID mirror configurations including system mirrors
     $0 --caddy                  # Install Caddy with current configuration
     $0 --network                # Configure network interfaces for additional IPs
+    $0 --network --reset        # Reset to base ariadata pve-install.sh network configuration
     $0 --pfsense                # Create pfSense VM after network configuration
     $0 --firewalladmin          # Create firewall admin container after pfSense setup
 
@@ -102,6 +104,11 @@ parse_args() {
             --network)
                 command="network"
                 shift
+                # Check for --reset flag
+                if [[ $# -gt 0 && "$1" == "--reset" ]]; then
+                    command_args+=("--reset")
+                    shift
+                fi
                 ;;
             --pfsense)
                 command="pfsense"
@@ -158,6 +165,10 @@ parse_args() {
                 ;;
             --caddy|--setup-system|--network|--pfsense|--firewalladmin|--check-mac|--setup-mirrors|--remove-mirrors|--format-drives)
                 # Already handled above
+                # Skip --reset flag for --network if present
+                if [[ "$1" == "--reset" ]]; then
+                    shift
+                fi
                 shift
                 ;;
             *)
@@ -246,10 +257,6 @@ validate_setup() {
             fi
             if ! command -v parted &> /dev/null; then
                 log "ERROR" "parted command not found. Required for partitioning."
-                exit 1
-            fi
-            if ! command -v mkfs.ext4 &> /dev/null; then
-                log "ERROR" "mkfs.ext4 command not found. Required for formatting."
                 exit 1
             fi
             ;;
@@ -393,8 +400,24 @@ run_caddy_setup() {
 run_network_setup() {
     log "INFO" "Starting Hetzner Proxmox network configuration..."
     log "INFO" "Logs are being written to: $LOG_FILE"
-    # Run network configuration script
-    run_script "scripts/configure-network.sh"
+    
+    # Build arguments for the network script
+    local network_args=()
+    
+    # Read command args from temp file
+    if [[ -f "/tmp/install_command_args_$$" ]]; then
+        while IFS= read -r arg; do
+            [[ -n "$arg" ]] && network_args+=("$arg")
+        done < "/tmp/install_command_args_$$"
+        rm -f "/tmp/install_command_args_$$"
+    fi
+    
+    # Run network configuration script with arguments
+    if [[ ${#network_args[@]} -gt 0 ]]; then
+        run_script "scripts/configure-network.sh" "${network_args[@]}"
+    else
+        run_script "scripts/configure-network.sh"
+    fi
 
     log "INFO" "✅ Network Configuration Complete!"
     log "INFO" "Network bridges have been configured successfully"
@@ -606,6 +629,7 @@ main() {
             log "INFO" "  --setup-mirrors  🔧 Scan drives and configure optimal RAID mirror arrays"
             log "INFO" "  --caddy          🌐 Install Caddy reverse proxy with HTTPS"
             log "INFO" "  --network        🔗 Configure network interfaces for additional IPs"
+            log "INFO" "  --network --reset🔄 Reset to base ariadata pve-install.sh network configuration"
             log "INFO" "  --pfsense        🔥 Create pfSense firewall VM (requires --network first)"
             log "INFO" "  --firewalladmin  🖥️  Create firewall admin container (requires --pfsense first)"
             echo
