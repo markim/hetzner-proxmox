@@ -271,9 +271,9 @@ create_ariadata_network_config() {
     # Get IPv6 address if available
     current_ipv6=$(ip addr show "$SSH_INTERFACE" | grep "inet6.*global" | awk '{print $2}' | head -n1)
     
-    # Define private subnet for vmbr1 (matching ariadata script)
-    local private_subnet="192.168.26.0/24"
-    local private_ip="192.168.26.1/24"
+    # Define private subnet for vmbr1 (pfSense compatible)
+    local private_subnet="192.168.1.0/24"
+    local private_ip="192.168.1.1/24"
     local first_ipv6=""
     if [[ -n "$current_ipv6" ]]; then
         # Generate first IPv6 CIDR similar to ariadata format
@@ -328,6 +328,7 @@ iface lo inet loopback
 
 iface lo inet6 loopback
 
+auto ${interface_for_mac}
 iface ${interface_for_mac} inet manual
 
 auto vmbr0
@@ -473,9 +474,9 @@ create_ariadata_compatible_config() {
     # Get IPv6 address if available
     current_ipv6=$(ip addr show "$SSH_INTERFACE" | grep "inet6.*global" | awk '{print $2}' | head -n1)
     
-    # Define private subnet for vmbr1 (matching ariadata script)
-    local private_subnet="192.168.26.0/24"
-    local private_ip="192.168.26.1/24"
+    # Define private subnet for vmbr1 (pfSense compatible)
+    local private_subnet="192.168.1.0/24"
+    local private_ip="192.168.1.1/24"
     local first_ipv6=""
     if [[ -n "$current_ipv6" ]]; then
         # Generate first IPv6 CIDR similar to ariadata format
@@ -512,6 +513,7 @@ iface lo inet loopback
 
 iface lo inet6 loopback
 
+auto ${interface_for_mac}
 iface ${interface_for_mac} inet manual
 
 auto vmbr0

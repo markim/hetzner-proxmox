@@ -402,7 +402,10 @@ run_network_setup() {
     log "INFO" "Logs are being written to: $LOG_FILE"
     
     # Enable verbose logging for network operations to help with debugging
-    export LOG_LEVEL="DEBUG"
+    # Only if not already set
+    if [[ "${LOG_LEVEL:-}" != "DEBUG" ]]; then
+        export LOG_LEVEL="DEBUG"
+    fi
     
     # Build arguments for the network script
     local network_args=()
