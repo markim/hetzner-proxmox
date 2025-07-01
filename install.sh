@@ -505,12 +505,12 @@ run_setup_mirrors() {
         rm -f "/tmp/install_command_args_$$"
     fi
     
-    # Run drives setup script - only pass args if we have any
+    # Run drives setup script - always run interactively unless explicitly passed --yes
     if [[ ${#command_args[@]} -gt 0 ]]; then
         run_script "scripts/setup-mirrors.sh" "${command_args[@]}"
     else
-        # When called from install.sh without arguments, run in non-interactive mode
-        run_script "scripts/setup-mirrors.sh" "--yes"
+        # When called from install.sh without arguments, run in interactive mode
+        run_script "scripts/setup-mirrors.sh"
     fi
     
     log "INFO" "✅ Drive Mirror Configuration Complete!"

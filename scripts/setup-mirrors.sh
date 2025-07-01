@@ -331,7 +331,7 @@ create_zfs_pools() {
         done
         
         if [[ ${#drives[@]} -eq 2 ]]; then
-            log "INFO" "Adding ZFS mirror to rpool: ${drives[0]} + ${drives[1]} -> $mirror_name"
+            log "INFO" "Adding ZFS mirror to rpool: ${drives[0]} + ${drives[1]}"
             
             # Handle system drives carefully
             if is_system_drive "${drives[0]}" || is_system_drive "${drives[1]}"; then
@@ -344,16 +344,16 @@ create_zfs_pools() {
             
             if add_mirror_to_rpool "$mirror_name" "${drives[0]}" "${drives[1]}"; then
                 success_count=$((success_count + 1))
-                log "INFO" "Successfully added mirror to rpool: $mirror_name"
+                log "INFO" "Successfully added mirror to rpool"
             else
-                log "ERROR" "Failed to add mirror to rpool: $mirror_name"
+                log "ERROR" "Failed to add mirror to rpool"
                 failed_groups+=("$mirror_group")
             fi
             
         elif [[ ${#drives[@]} -eq 1 ]]; then
             # Single drive - add as a mirror (can be expanded later)
             local drive="${drives[0]}"
-            log "INFO" "Adding single ZFS device to rpool: $drive -> $mirror_name"
+            log "INFO" "Adding single ZFS device to rpool as mirror: $drive"
             
             if is_system_drive "$drive"; then
                 log "INFO" "Skipping single system drive: $drive"
@@ -363,9 +363,9 @@ create_zfs_pools() {
             
             if add_single_to_rpool "$mirror_name" "$drive"; then
                 success_count=$((success_count + 1))
-                log "INFO" "Successfully added single device to rpool: $mirror_name"
+                log "INFO" "Successfully added single device to rpool as mirror"
             else
-                log "ERROR" "Failed to add single device to rpool: $mirror_name"
+                log "ERROR" "Failed to add single device to rpool as mirror"
                 failed_groups+=("$mirror_group")
             fi
             
@@ -437,20 +437,20 @@ add_mirror_to_rpool() {
         fi
     done
     
-    log "INFO" "Adding mirror to rpool: $mirror_name"
+    log "INFO" "Adding mirror to rpool"
     
     # Add mirror to existing rpool
     set +e
-    zpool add rpool "$mirror_name" mirror "$drive1" "$drive2"
+    zpool add rpool mirror "$drive1" "$drive2"
     local add_result=$?
     set -e
     
     if [[ $add_result -ne 0 ]]; then
-        log "ERROR" "Failed to add mirror $mirror_name to rpool"
+        log "ERROR" "Failed to add mirror to rpool"
         return 1
     fi
     
-    log "INFO" "Successfully added mirror to rpool: $mirror_name"
+    log "INFO" "Successfully added mirror to rpool"
     return 0
 }
 
@@ -498,20 +498,20 @@ add_single_to_rpool() {
         fi
     fi
     
-    log "INFO" "Adding single device to rpool: $mirror_name"
+    log "INFO" "Adding single device to rpool as single-device mirror"
     
-    # Add single device to existing rpool
+    # Add single device to existing rpool as a mirror (required for consistency)
     set +e
-    zpool add rpool "$drive"
+    zpool add rpool mirror "$drive"
     local add_result=$?
     set -e
     
     if [[ $add_result -ne 0 ]]; then
-        log "ERROR" "Failed to add device $drive to rpool"
+        log "ERROR" "Failed to add device $drive to rpool as mirror"
         return 1
     fi
     
-    log "INFO" "Successfully added device to rpool: $drive"
+    log "INFO" "Successfully added device to rpool as single-device mirror: $drive"
     return 0
 }
 
