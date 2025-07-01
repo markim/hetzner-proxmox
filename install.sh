@@ -401,6 +401,9 @@ run_network_setup() {
     log "INFO" "Starting Hetzner Proxmox network configuration..."
     log "INFO" "Logs are being written to: $LOG_FILE"
     
+    # Enable verbose logging for network operations to help with debugging
+    export LOG_LEVEL="DEBUG"
+    
     # Build arguments for the network script
     local network_args=()
     
@@ -412,11 +415,14 @@ run_network_setup() {
         rm -f "/tmp/install_command_args_$$"
     fi
     
+    # Add verbose flag to network script
+    network_args+=("--verbose")
+    
     # Run network configuration script with arguments
     if [[ ${#network_args[@]} -gt 0 ]]; then
         run_script "scripts/configure-network.sh" "${network_args[@]}"
     else
-        run_script "scripts/configure-network.sh"
+        run_script "scripts/configure-network.sh" "--verbose"
     fi
 
     log "INFO" "✅ Network Configuration Complete!"
