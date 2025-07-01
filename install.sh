@@ -250,10 +250,6 @@ validate_setup() {
                 log "ERROR" "lsblk command not found. Required for drive management."
                 exit 1
             fi
-            if ! command -v mdadm &> /dev/null; then
-                log "ERROR" "mdadm command not found. Required for RAID management."
-                exit 1
-            fi
             ;;
         "drives")
             # Drives configuration - check we have the required tools
@@ -262,18 +258,10 @@ validate_setup() {
                 log "ERROR" "lsblk command not found. Required for drive management."
                 exit 1
             fi
-            if ! command -v mdadm &> /dev/null; then
-                log "ERROR" "mdadm command not found. Required for RAID management."
-                exit 1
-            fi
             ;;
         "remove-mirrors")
             # RAID mirror removal - check we have the required tools
             log "INFO" "RAID mirror removal - checking for required tools"
-            if ! command -v mdadm &> /dev/null; then
-                log "ERROR" "mdadm command not found. Required for RAID management."
-                exit 1
-            fi
             if ! command -v findmnt &> /dev/null; then
                 log "ERROR" "findmnt command not found. Required for mount detection."
                 exit 1

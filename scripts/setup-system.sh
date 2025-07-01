@@ -51,28 +51,35 @@ optimize_system() {
         rsyslog \
         logrotate \
         parted \
-        mdadm \
         curl \
         debian-keyring \
         debian-archive-keyring \
         apt-transport-https \
-        gnupg
+        gnupg \
+        zfsutils-linux \
+        nvme-cli \
+        fio
+    
+    # Configure ZFS optimizations
+    optimize_zfs
     
     # Configure system swappiness for better VM performance
     log "INFO" "Configuring VM swappiness..."
-    echo "vm.swappiness=10" > /etc/sysctl.d/99-proxmox-swappiness.conf
+    echo "vm.swappiness=1" > /etc/sysctl.d/99-proxmox-swappiness.conf
     
     # Configure dirty page handling for better I/O performance
     log "INFO" "Configuring I/O performance settings..."
     cat > /etc/sysctl.d/99-proxmox-io.conf << 'EOF'
-# I/O performance tuning for Proxmox
+# I/O performance tuning for Proxmox with ZFS
 vm.dirty_background_ratio = 5
 vm.dirty_ratio = 10
 vm.dirty_expire_centisecs = 3000
 vm.dirty_writeback_centisecs = 500
+vm.vfs_cache_pressure = 50
+vm.min_free_kbytes = 131072
 EOF
     
-    # Configure network performance
+    # Configure network performance and netfilter
     log "INFO" "Configuring network performance settings..."
     cat > /etc/sysctl.d/99-proxmox-network.conf << 'EOF'
 # Network performance tuning for Proxmox
@@ -84,6 +91,17 @@ net.ipv4.tcp_rmem = 4096 87380 16777216
 net.ipv4.tcp_wmem = 4096 65536 16777216
 net.core.netdev_max_backlog = 5000
 net.ipv4.tcp_congestion_control = bbr
+net.ipv4.tcp_window_scaling = 1
+net.ipv4.tcp_timestamps = 1
+net.ipv4.tcp_sack = 1
+net.core.somaxconn = 8192
+
+# Netfilter connection tracking optimizations
+net.netfilter.nf_conntrack_max = 1048576
+net.netfilter.nf_conntrack_tcp_timeout_established = 28800
+net.netfilter.nf_conntrack_tcp_timeout_time_wait = 30
+net.netfilter.nf_conntrack_tcp_timeout_close_wait = 15
+net.netfilter.nf_conntrack_tcp_timeout_fin_wait = 30
 EOF
     
     # Configure kernel parameters for virtualization
@@ -97,6 +115,15 @@ kernel.sched_autogroup_enabled = 0
 
 # Disable NUMA balancing for better VM performance
 kernel.numa_balancing = 0
+
+# Memory management optimizations
+vm.zone_reclaim_mode = 0
+vm.max_map_count = 262144
+
+# KVM optimizations
+kernel.sched_migration_cost_ns = 5000000
+kernel.sched_min_granularity_ns = 10000000
+kernel.sched_wakeup_granularity_ns = 15000000
 EOF
     
     # Apply sysctl settings with error handling
@@ -213,6 +240,154 @@ EOF
     log "INFO" "System optimization completed successfully"
 }
 
+# Function to optimize ZFS for Proxmox
+optimize_zfs() {
+    log "INFO" "Configuring ZFS optimizations for Proxmox..."
+    
+    # Check if ZFS is available
+    if ! command -v zfs &> /dev/null; then
+        log "WARNING" "ZFS not found, skipping ZFS optimizations"
+        return
+    fi
+    
+    # Detect system memory for ZFS ARC sizing
+    local total_memory_kb
+    total_memory_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+    local total_memory_gb=$((total_memory_kb / 1024 / 1024))
+    
+    # Calculate ARC limits (more conservative for Proxmox)
+    local arc_min_gb=6
+    local arc_max_gb=12
+    
+    # Adjust based on system memory
+    if [[ $total_memory_gb -lt 32 ]]; then
+        arc_min_gb=2
+        arc_max_gb=8
+        log "INFO" "Adjusting ZFS ARC limits for system with ${total_memory_gb}GB RAM"
+    elif [[ $total_memory_gb -gt 64 ]]; then
+        arc_min_gb=8
+        arc_max_gb=24
+        log "INFO" "Adjusting ZFS ARC limits for system with ${total_memory_gb}GB RAM"
+    fi
+    
+    # Configure ZFS module parameters
+    log "INFO" "Configuring ZFS module parameters..."
+    rm -f /etc/modprobe.d/zfs.conf
+    cat > /etc/modprobe.d/99-zfs.conf << EOF
+# ZFS ARC memory limits for Proxmox
+options zfs zfs_arc_min=$((arc_min_gb * 1024 * 1024 * 1024))
+options zfs zfs_arc_max=$((arc_max_gb * 1024 * 1024 * 1024))
+
+# ZFS performance optimizations
+options zfs zfs_txg_timeout=5
+options zfs zfs_vdev_scheduler=deadline
+options zfs zfs_prefetch_disable=0
+options zfs zfs_vdev_cache_size=10485760
+options zfs metaslab_debug_load=0
+options zfs metaslab_debug_unload=0
+options zfs zfs_dirty_data_max_percent=25
+options zfs zfs_delay_min_dirty_percent=60
+options zfs zfs_dirty_data_sync_percent=20
+options zfs l2arc_write_max=134217728
+options zfs l2arc_write_boost=268435456
+options zfs l2arc_headroom=8
+options zfs l2arc_feed_secs=1
+options zfs l2arc_feed_min_ms=200
+
+# Increase default recordsize for better performance
+options zfs zfs_max_recordsize=16777216
+EOF
+    
+    # Configure kernel modules
+    log "INFO" "Configuring kernel modules..."
+    echo "nf_conntrack" >> /etc/modules
+    
+    # Ensure ZFS module is loaded at boot
+    if ! grep -q "^zfs$" /etc/modules 2>/dev/null; then
+        echo "zfs" >> /etc/modules
+    fi
+    
+    # Update initramfs to apply ZFS settings
+    log "INFO" "Updating initramfs with ZFS configuration..."
+    if ! update-initramfs -u; then
+        log "WARNING" "Failed to update initramfs - ZFS settings may not be active until reboot"
+    fi
+    
+    # Set ZFS runtime parameters if ZFS is already loaded
+    if lsmod | grep -q zfs; then
+        log "INFO" "Applying ZFS runtime parameters..."
+        
+        # Apply ARC settings
+        if [[ -f /sys/module/zfs/parameters/zfs_arc_min ]]; then
+            echo $((arc_min_gb * 1024 * 1024 * 1024)) > /sys/module/zfs/parameters/zfs_arc_min 2>/dev/null || true
+        fi
+        if [[ -f /sys/module/zfs/parameters/zfs_arc_max ]]; then
+            echo $((arc_max_gb * 1024 * 1024 * 1024)) > /sys/module/zfs/parameters/zfs_arc_max 2>/dev/null || true
+        fi
+        
+        # Apply other runtime parameters
+        local zfs_params=(
+            "zfs_txg_timeout=5"
+            "zfs_dirty_data_max_percent=25"
+            "zfs_delay_min_dirty_percent=60"
+            "zfs_dirty_data_sync_percent=20"
+        )
+        
+        for param in "${zfs_params[@]}"; do
+            local param_name
+            local param_value
+            param_name=$(echo "$param" | cut -d'=' -f1)
+            param_value=$(echo "$param" | cut -d'=' -f2)
+            local param_file="/sys/module/zfs/parameters/$param_name"
+            
+            if [[ -f "$param_file" ]]; then
+                echo "$param_value" > "$param_file" 2>/dev/null || true
+            fi
+        done
+    fi
+    
+    # Optimize ZFS datasets if any exist
+    if zfs list &>/dev/null; then
+        log "INFO" "Optimizing existing ZFS datasets..."
+        
+        # Get all ZFS datasets
+        local datasets
+        datasets=$(zfs list -H -o name 2>/dev/null | grep -v "^$" || true)
+        
+        if [[ -n "$datasets" ]]; then
+            while IFS= read -r dataset; do
+                # Skip if dataset doesn't exist or is a snapshot
+                if [[ "$dataset" == *"@"* ]] || ! zfs get name "$dataset" &>/dev/null; then
+                    continue
+                fi
+                
+                log "DEBUG" "Optimizing ZFS dataset: $dataset"
+                
+                # Apply performance optimizations
+                zfs set compression=lz4 "$dataset" 2>/dev/null || true
+                zfs set atime=off "$dataset" 2>/dev/null || true
+                zfs set relatime=on "$dataset" 2>/dev/null || true
+                zfs set logbias=throughput "$dataset" 2>/dev/null || true
+                zfs set primarycache=all "$dataset" 2>/dev/null || true
+                zfs set secondarycache=all "$dataset" 2>/dev/null || true
+                
+                # For root datasets, set specific optimizations
+                if [[ "$dataset" == "rpool" ]] || [[ "$dataset" == "rpool/ROOT"* ]]; then
+                    zfs set sync=standard "$dataset" 2>/dev/null || true
+                    zfs set recordsize=128K "$dataset" 2>/dev/null || true
+                elif [[ "$dataset" == *"/vm-"* ]] || [[ "$dataset" == *"/base-"* ]]; then
+                    # VM storage optimizations
+                    zfs set sync=always "$dataset" 2>/dev/null || true
+                    zfs set recordsize=64K "$dataset" 2>/dev/null || true
+                    zfs set volblocksize=16K "$dataset" 2>/dev/null || true
+                fi
+            done <<< "$datasets"
+        fi
+    fi
+    
+    log "INFO" "ZFS optimization completed (ARC: ${arc_min_gb}GB-${arc_max_gb}GB)"
+}
+
 # Function to safely apply sysctl settings
 apply_sysctl_safe() {
     local config_file="$1"
@@ -263,13 +438,14 @@ main() {
                 cat << EOF
 Usage: $0 [OPTIONS]
 
-Optimize the Proxmox host system for performance.
+Optimize the Proxmox host system for performance, including ZFS optimizations.
 
 OPTIONS:
     --help                Show this help message
 
 OPTIMIZATIONS PERFORMED:
     - System package updates
+    - ZFS performance tuning (ARC limits, module parameters)
     - Performance tuning for virtualization
     - Network performance optimization
     - I/O performance tuning
@@ -277,6 +453,7 @@ OPTIMIZATIONS PERFORMED:
     - Log rotation setup
     - Time synchronization
     - IRQ balancing
+    - Netfilter connection tracking optimization
 
 EXAMPLES:
     $0                        # Run system optimization
@@ -308,12 +485,14 @@ EOF
     log "INFO" "✅ System optimization completed successfully!"
     log "INFO" ""
     log "INFO" "System optimizations applied:"
+    log "INFO" "- ZFS performance tuning (ARC limits, module parameters, datasets)"
     log "INFO" "- VM performance tuning (swappiness, I/O, network)"
     log "INFO" "- CPU performance governor enabled"
     log "INFO" "- IRQ balancing configured"
     log "INFO" "- Time synchronization with chrony"
     log "INFO" "- Log rotation configured"
     log "INFO" "- Tuned virtualization profile active"
+    log "INFO" "- Netfilter connection tracking optimized"
     echo
     
     log "INFO" "Next steps:"
