@@ -176,8 +176,10 @@ parse_args() {
     fi
     
     export COMMAND="$command"
-    # Export command args by writing to a temp file since arrays can't be exported
-    printf '%s\n' "${command_args[@]}" > "/tmp/install_command_args_$$" 2>/dev/null || true
+    # Simple approach - don't create temp file if no args
+    if [[ ${#command_args[@]} -gt 0 ]]; then
+        printf '%s\n' "${command_args[@]}" > "/tmp/install_command_args_$$"
+    fi
     
 }
 
@@ -471,7 +473,7 @@ run_setup_mirrors() {
         rm -f "/tmp/install_command_args_$$"
     fi
     
-    # Run drives setup script with any additional arguments
+    # Run drives setup script - only pass args if we have any
     if [[ ${#command_args[@]} -gt 0 ]]; then
         run_script "scripts/setup-mirrors.sh" "${command_args[@]}"
     else

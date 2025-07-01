@@ -161,13 +161,25 @@ detect_drives() {
 group_drives_by_size() {
     log "INFO" "Grouping drives by size for optimal mirroring..."
     
+    if [[ ${#AVAILABLE_DRIVES[@]} -eq 0 ]]; then
+        log "ERROR" "No available drives to group"
+        return 1
+    fi
+    
+    log "DEBUG" "Available drives: ${AVAILABLE_DRIVES[*]}"
+    log "DEBUG" "Drive sizes: ${DRIVE_SIZES[*]}"
+    
     declare -A size_groups
     
     # Group drives by size
     for i in "${!AVAILABLE_DRIVES[@]}"; do
         local size="${DRIVE_SIZES[i]}"
         size_groups["$size"]+="${AVAILABLE_DRIVES[i]} "
+        log "DEBUG" "Added ${AVAILABLE_DRIVES[i]} to size group $size"
     done
+    
+    # Clear mirror groups before populating
+    MIRROR_GROUPS=()
     
     # Create mirror groups
     for size in "${!size_groups[@]}"; do
@@ -182,19 +194,26 @@ group_drives_by_size() {
             log "INFO" "  -> Creating $pairs ZFS mirror(s)"
             
             for ((j=0; j<pairs*2; j+=2)); do
-                MIRROR_GROUPS+=("${drives[j]} ${drives[j+1]}")
+                local mirror_pair="${drives[j]} ${drives[j+1]}"
+                MIRROR_GROUPS+=("$mirror_pair")
+                log "DEBUG" "Created mirror group: $mirror_pair"
             done
             
             # Handle remaining single drive
-            [[ $((count % 2)) -eq 1 ]] && {
+            if [[ $((count % 2)) -eq 1 ]]; then
                 log "INFO" "  -> 1 single drive pool: ${drives[-1]}"
                 MIRROR_GROUPS+=("${drives[-1]}")
-            }
+                log "DEBUG" "Created single drive group: ${drives[-1]}"
+            fi
         else
             log "INFO" "  -> Single drive pool"
             MIRROR_GROUPS+=("${drives[0]}")
+            log "DEBUG" "Created single drive group: ${drives[0]}"
         fi
     done
+    
+    log "DEBUG" "Final mirror groups: ${MIRROR_GROUPS[*]}"
+    return 0
 }
 
 # Check current storage status
@@ -232,13 +251,24 @@ install_zfs() {
 # Create ZFS pools efficiently
 create_zfs_pools() {
     log "INFO" "Creating ZFS pools..."
-    install_zfs
+    
+    # Check if we have any mirror groups
+    if [[ ${#MIRROR_GROUPS[@]} -eq 0 ]]; then
+        log "ERROR" "No mirror groups defined. This should not happen."
+        return 1
+    fi
+    
+    log "DEBUG" "Processing ${#MIRROR_GROUPS[@]} mirror groups: ${MIRROR_GROUPS[*]}"
+    
+    install_zfs || { log "ERROR" "Failed to install/setup ZFS"; return 1; }
     
     local pool_index=0 success_count=0
     declare -a failed_groups=()
     
     for mirror_group in "${MIRROR_GROUPS[@]}"; do
+        log "DEBUG" "Processing mirror group: '$mirror_group'"
         read -ra drives <<< "$mirror_group"
+        log "DEBUG" "Drives in group: ${drives[*]} (count: ${#drives[@]})"
         
         # Generate unique pool name
         local pool_name
@@ -249,6 +279,8 @@ create_zfs_pools() {
             fi
             ((pool_index++))
         done
+        
+        log "DEBUG" "Using pool name: $pool_name"
         
         if [[ ${#drives[@]} -eq 2 ]]; then
             log "INFO" "Creating ZFS mirror: ${drives[0]} + ${drives[1]} -> $pool_name"
@@ -264,12 +296,19 @@ create_zfs_pools() {
             fi
             
             if create_zfs_mirror "$pool_name" "${drives[0]}" "${drives[1]}"; then
-                add_to_proxmox_storage "$pool_name" "zfs-mirror-$pool_index" && ((success_count++))
+                if add_to_proxmox_storage "$pool_name" "zfs-mirror-$pool_index"; then
+                    ((success_count++))
+                    log "INFO" "Successfully created and added mirror: $pool_name"
+                else
+                    log "WARN" "Mirror created but failed to add to Proxmox storage"
+                    ((success_count++))  # Still count as success since pool was created
+                fi
             else
+                log "ERROR" "Failed to create ZFS mirror: $pool_name"
                 failed_groups+=("$mirror_group")
             fi
             
-        else
+        elif [[ ${#drives[@]} -eq 1 ]]; then
             # Single drive
             local drive="${drives[0]}"
             log "INFO" "Creating single ZFS pool: $drive -> $pool_name"
@@ -282,10 +321,20 @@ create_zfs_pools() {
             fi
             
             if create_zfs_single "$pool_name" "$drive"; then
-                add_to_proxmox_storage "$pool_name" "zfs-single-$pool_index" && ((success_count++))
+                if add_to_proxmox_storage "$pool_name" "zfs-single-$pool_index"; then
+                    ((success_count++))
+                    log "INFO" "Successfully created and added single pool: $pool_name"
+                else
+                    log "WARN" "Pool created but failed to add to Proxmox storage"
+                    ((success_count++))  # Still count as success since pool was created
+                fi
             else
+                log "ERROR" "Failed to create ZFS pool: $pool_name"
                 failed_groups+=("$mirror_group")
             fi
+        else
+            log "ERROR" "Invalid drive count in mirror group: ${#drives[@]} drives"
+            failed_groups+=("$mirror_group")
         fi
         
         ((pool_index++))
@@ -293,9 +342,18 @@ create_zfs_pools() {
     
     # Report results
     log "INFO" "ZFS creation completed: $success_count successful, ${#failed_groups[@]} failed"
-    [[ ${#failed_groups[@]} -gt 0 ]] && {
+    if [[ ${#failed_groups[@]} -gt 0 ]]; then
         log "WARN" "Failed groups: ${failed_groups[*]}"
-    }
+        log "WARN" "Some storage pools could not be created"
+    fi
+    
+    if [[ $success_count -eq 0 ]]; then
+        log "ERROR" "No storage pools were created successfully"
+        return 1
+    fi
+    
+    log "INFO" "Successfully created $success_count storage pool(s)"
+    return 0
 }
 
 # Create ZFS mirror with optimal settings
@@ -507,7 +565,16 @@ EOF
     # Execution flow
     detect_drives
     
-    group_drives_by_size
+    if ! group_drives_by_size; then
+        log "ERROR" "Failed to group drives by size"
+        exit 1
+    fi
+    
+    if [[ ${#MIRROR_GROUPS[@]} -eq 0 ]]; then
+        log "ERROR" "No mirror groups were created. Cannot proceed."
+        exit 1
+    fi
+    
     check_current_storage
     
     # Show proposed configuration
@@ -531,7 +598,12 @@ EOF
     [[ "$confirm" =~ ^[Yy]$ ]] || { log "INFO" "Cancelled"; exit 0; }
     
     # Execute configuration
-    create_zfs_pools
+    if ! create_zfs_pools; then
+        log "ERROR" "ZFS pool creation failed"
+        log "INFO" "Please check the error messages above and try again"
+        exit 1
+    fi
+    
     show_final_status
     
     log "INFO" "✅ Setup completed successfully!"
