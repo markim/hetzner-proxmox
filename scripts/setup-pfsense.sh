@@ -23,7 +23,7 @@ PFSENSE_DISK_SIZE="${PFSENSE_DISK_SIZE:-8}"
 PFSENSE_WAN_IP="${PFSENSE_WAN_IP:-}"
 PFSENSE_LAN_IP="${PFSENSE_LAN_IP:-192.168.1.1}"
 PFSENSE_LAN_SUBNET="${PFSENSE_LAN_SUBNET:-192.168.1.0/24}"
-PFSENSE_DMZ_IP="${PFSENSE_DMZ_IP:-10.0.2.1}"
+PFSENSE_DMZ_IP="${PFSENSE_DMZ_IP:-10.0.2.254}"
 PFSENSE_DMZ_SUBNET="${PFSENSE_DMZ_SUBNET:-10.0.2.0/24}"
 PFSENSE_DHCP_START="${PFSENSE_DHCP_START:-192.168.1.100}"
 PFSENSE_DHCP_END="${PFSENSE_DHCP_END:-192.168.1.200}"
@@ -328,8 +328,8 @@ EOF
     # Validate network configuration is proper for pfSense
     local vmbr1_ip
     vmbr1_ip=$(ip addr show vmbr1 2>/dev/null | grep "inet " | awk '{print $2}' | cut -d'/' -f1 | head -n1)
-    if [[ "$vmbr1_ip" != "192.168.1.1" ]]; then
-        log "ERROR" "vmbr1 must have IP 192.168.1.1 for pfSense LAN configuration"
+    if [[ "$vmbr1_ip" != "192.168.1.10" ]]; then
+        log "ERROR" "vmbr1 must have IP 192.168.1.10 for host in pfSense LAN network"
         log "ERROR" "Current vmbr1 IP: ${vmbr1_ip:-none}"
         log "ERROR" "Run network configuration to fix this: ./scripts/setup-network.sh"
         return 1
@@ -339,7 +339,7 @@ EOF
     if ip link show vmbr2 >/dev/null 2>&1; then
         vmbr2_ip=$(ip addr show vmbr2 2>/dev/null | grep "inet " | awk '{print $2}' | cut -d'/' -f1 | head -n1)
         if [[ "$vmbr2_ip" != "10.0.2.1" ]]; then
-            log "WARN" "vmbr2 should have IP 10.0.2.1 for pfSense DMZ configuration"
+            log "WARN" "vmbr2 should have IP 10.0.2.1 for host bridge (pfSense DMZ will use 10.0.2.254)"
             log "WARN" "Current vmbr2 IP: ${vmbr2_ip:-none}"
         fi
     fi
@@ -439,15 +439,18 @@ create_pfsense_vm() {
         --scsi0 "local-zfs:$PFSENSE_DISK_SIZE,cache=writeback,discard=on,iothread=1"
     
     # Configure network interfaces with proper virtio drivers
-    # WAN interface (vmbr0) - use MAC address if available
+    # WAN interface (vmbr0) - MAC address is REQUIRED for Hetzner additional IPs
     local wan_net_config="virtio,bridge=vmbr0,firewall=0"
     if [[ -n "${ADDITIONAL_MACS_ARRAY[*]:-}" && ${#ADDITIONAL_MACS_ARRAY[@]} -gt 0 && -n "${ADDITIONAL_MACS_ARRAY[0]}" ]]; then
         wan_net_config="virtio,bridge=vmbr0,firewall=0,macaddr=${ADDITIONAL_MACS_ARRAY[0]}"
-        log "INFO" "WAN interface configured with MAC address: ${ADDITIONAL_MACS_ARRAY[0]}"
+        log "INFO" "✓ WAN interface configured with MAC address: ${ADDITIONAL_MACS_ARRAY[0]}"
+        log "INFO" "✓ This MAC corresponds to additional IP: $PFSENSE_WAN_IP"
     else
-        log "WARN" "No MAC address specified for WAN interface - using auto-generated"
-        log "WARN" "This may cause routing issues with Hetzner additional IPs"
-        log "WARN" "Configure MAC addresses in additional-ips.conf for proper routing"
+        log "ERROR" "MAC address REQUIRED for pfSense WAN interface with Hetzner additional IP"
+        log "ERROR" "Without the correct MAC address, traffic will not reach pfSense"
+        log "ERROR" "Configure MAC addresses in config/additional-ips.conf"
+        log "ERROR" "Get MAC addresses from Hetzner Robot panel or contact support"
+        return 1
     fi
     qm set "$PFSENSE_VM_ID" --net0 "$wan_net_config"
     

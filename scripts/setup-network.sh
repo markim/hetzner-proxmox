@@ -258,8 +258,8 @@ create_ariadata_network_config() {
     # Try to get CIDR from current IP configuration
     current_cidr=$(ip addr show "$SSH_INTERFACE" | grep "inet " | grep "$CURRENT_IP" | awk '{print $2}' | head -n1)
     if [[ -z "$current_cidr" ]]; then
-        log "WARN" "Could not determine current CIDR, using /24 as fallback"
-        current_cidr="$CURRENT_IP/24"
+        log "WARN" "Could not determine current CIDR, using /26 as fallback for Hetzner"
+        current_cidr="$CURRENT_IP/26"
     fi
     
     # Get current gateway
@@ -285,7 +285,7 @@ create_ariadata_network_config() {
     
     # Define private subnet for vmbr1 (pfSense compatible)
     local private_subnet="192.168.1.0/24"
-    local private_ip="192.168.1.254/24"  # Use .254 to avoid conflict with pfSense LAN IP (.1)
+    local private_ip="192.168.1.10/24"  # Host IP that doesn't conflict with pfSense gateway (.1)
     local first_ipv6=""
     if [[ -n "$current_ipv6" ]]; then
         # Generate first IPv6 CIDR similar to ariadata format
@@ -533,16 +533,13 @@ EOF
 # LAN Bridge (vmbr1) - pfSense management network
 auto vmbr1
 iface vmbr1 inet static
-    address 192.168.1.254/24  # Use .254 to avoid conflict with pfSense LAN IP (.1)
+    address 192.168.1.10/24  # Host IP that doesn't conflict with pfSense gateway (.1)
     bridge-ports none
     bridge-stp off
     bridge-fd 0
     bridge-maxwait 0
-    # NAT rules for LAN traffic
-    post-up   iptables -t nat -A POSTROUTING -s '192.168.1.0/24' -o vmbr0 -j MASQUERADE
-    post-down iptables -t nat -D POSTROUTING -s '192.168.1.0/24' -o vmbr0 -j MASQUERADE
-    post-up   iptables -t raw -I PREROUTING -i fwbr+ -j CT --zone 1
-    post-down iptables -t raw -D PREROUTING -i fwbr+ -j CT --zone 1
+    # Remove NAT rules - pfSense will handle routing
+    # pfSense at 192.168.1.1 will be the gateway for this network
 EOF
 
     # Add vmbr2 configuration (DMZ bridge)
@@ -556,11 +553,7 @@ iface vmbr2 inet static
     bridge-stp off
     bridge-fd 0
     bridge-maxwait 0
-    # NAT rules for DMZ traffic
-    post-up   iptables -t nat -A POSTROUTING -s '10.0.2.0/24' -o vmbr0 -j MASQUERADE
-    post-down iptables -t nat -D POSTROUTING -s '10.0.2.0/24' -o vmbr0 -j MASQUERADE
-    post-up   iptables -t raw -I PREROUTING -i fwbr+ -j CT --zone 1
-    post-down iptables -t raw -D PREROUTING -i fwbr+ -j CT --zone 1
+    # No NAT rules - pfSense will handle DMZ routing and firewall rules
 EOF
     
     # Validate the new configuration
@@ -655,7 +648,7 @@ create_ariadata_compatible_config() {
     
     # Define private subnet for vmbr1 (pfSense compatible)
     local private_subnet="192.168.1.0/24"
-    local private_ip="192.168.1.254/24"  # Use .254 to avoid conflict with pfSense LAN IP (.1)
+    local private_ip="192.168.1.10/24"  # Host IP that doesn't conflict with pfSense gateway (.1)
     local first_ipv6=""
     if [[ -n "$current_ipv6" ]]; then
         log "DEBUG" "Processing IPv6 configuration"
@@ -743,15 +736,18 @@ EOF
             echo "    post-up ip addr add $ip/$cidr dev vmbr0" >> "$temp_config"
             echo "    post-down ip addr del $ip/$cidr dev vmbr0" >> "$temp_config"
             
-            # Add route for this additional IP if gateway is different
-            if [[ "$gateway" != "$current_gateway" ]]; then
-                echo "    post-up ip route add $ip via $gateway dev vmbr0" >> "$temp_config"
-                echo "    post-down ip route del $ip via $gateway dev vmbr0" >> "$temp_config"
-            fi
+            # For Hetzner additional IPs, all traffic must route through main gateway
+            # Add specific route for this IP through the main gateway
+            echo "    post-up ip route add $ip/32 dev vmbr0 table main" >> "$temp_config"
+            echo "    post-down ip route del $ip/32 dev vmbr0 table main" >> "$temp_config"
             
-            # Add MAC address configuration if provided
+            # Add MAC address configuration if provided - CRITICAL for Hetzner routing
             if [[ -n "$mac" ]]; then
-                echo "    # MAC for $ip: $mac (configured via Hetzner panel)" >> "$temp_config"
+                echo "    # MAC for $ip: $mac (REQUIRED for Hetzner routing!)" >> "$temp_config"
+                echo "    # Configure this MAC in the VM/container using this IP" >> "$temp_config"
+            else
+                echo "    # WARNING: No MAC address configured for $ip" >> "$temp_config"
+                echo "    # Hetzner additional IPs require correct MAC addresses for routing!" >> "$temp_config"
             fi
         done
     fi
@@ -846,8 +842,8 @@ create_standard_network_config() {
     # Try to get CIDR from current IP configuration
     current_cidr=$(ip addr show "$SSH_INTERFACE" | grep "inet " | grep "$CURRENT_IP" | awk '{print $2}' | head -n1)
     if [[ -z "$current_cidr" ]]; then
-        log "WARN" "Could not determine current CIDR, using /24 as fallback"
-        current_cidr="$CURRENT_IP/24"
+        log "WARN" "Could not determine current CIDR, using /26 as fallback for Hetzner"
+        current_cidr="$CURRENT_IP/26"
     fi
     
     # Get current gateway
@@ -945,7 +941,7 @@ EOF
 # LAN Bridge for internal networking (pfSense LAN side)
 auto vmbr1
 iface vmbr1 inet static
-    address 192.168.1.254/24  # Use .254 to avoid conflict with pfSense LAN IP (.1)
+    address 192.168.1.10/24  # Host IP that doesn't conflict with pfSense gateway (.1)
     bridge-ports none
     bridge-stp off
     bridge-fd 0
@@ -967,7 +963,7 @@ EOF
 # LAN Bridge for internal networking (pfSense LAN side)
 auto vmbr1
 iface vmbr1 inet static
-    address 192.168.1.254/24  # Use .254 to avoid conflict with pfSense LAN IP (.1)
+    address 192.168.1.10/24  # Host IP that doesn't conflict with pfSense gateway (.1)
     bridge-ports none
     bridge-stp off
     bridge-fd 0
@@ -1011,6 +1007,70 @@ EOF
     
     log "INFO" "Network configuration created successfully"
     export NEW_INTERFACES_CONFIG="$temp_config"
+}
+
+# Validate Hetzner-specific requirements for additional IPs
+validate_hetzner_config() {
+    log "INFO" "Validating Hetzner-specific configuration requirements..."
+    
+    # Check if we have additional IPs configured
+    if [[ -n "${ADDITIONAL_IPS_ARRAY[*]:-}" && ${#ADDITIONAL_IPS_ARRAY[@]} -gt 0 ]]; then
+        log "INFO" "Found ${#ADDITIONAL_IPS_ARRAY[@]} additional IP(s) configured"
+        
+        # Validate each additional IP has required MAC address for Hetzner
+        for i in "${!ADDITIONAL_IPS_ARRAY[@]}"; do
+            local ip="${ADDITIONAL_IPS_ARRAY[$i]}"
+            local mac="${ADDITIONAL_MACS_ARRAY[$i]:-}"
+            local gateway="${ADDITIONAL_GATEWAYS_ARRAY[$i]}"
+            local netmask="${ADDITIONAL_NETMASKS_ARRAY[$i]}"
+            
+            log "INFO" "Validating additional IP $((i+1)): $ip"
+            
+            # Critical: MAC address validation for Hetzner
+            if [[ -z "$mac" ]]; then
+                log "ERROR" "MAC address is REQUIRED for additional IP: $ip"
+                log "ERROR" "Hetzner routes additional IPs based on MAC addresses"
+                log "ERROR" "Get MAC addresses from Hetzner Robot panel or contact support"
+                log "ERROR" "Configure in config/additional-ips.conf: MAC=XX:XX:XX:XX:XX:XX"
+                return 1
+            fi
+            
+            # Validate MAC address format
+            if [[ ! "$mac" =~ ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$ ]]; then
+                log "ERROR" "Invalid MAC address format for IP $ip: $mac"
+                log "ERROR" "Required format: XX:XX:XX:XX:XX:XX (e.g., 00:50:56:00:01:02)"
+                return 1
+            fi
+            
+            # Validate gateway matches main gateway (Hetzner requirement)
+            local main_gateway
+            main_gateway=$(ip route | grep default | awk '{print $3}' | head -n1)
+            if [[ "$gateway" != "$main_gateway" ]]; then
+                log "WARN" "Additional IP gateway ($gateway) differs from main gateway ($main_gateway)"
+                log "WARN" "This is unusual for Hetzner - verify configuration with Hetzner support"
+            fi
+            
+            # Validate netmask is reasonable for Hetzner (/26 to /29 typical)
+            local cidr
+            if ! cidr=$(netmask_to_cidr "$netmask"); then
+                log "ERROR" "Invalid netmask for IP $ip: $netmask"
+                return 1
+            fi
+            
+            if [[ $cidr -lt 26 || $cidr -gt 30 ]]; then
+                log "WARN" "Unusual subnet size /$cidr for additional IP $ip"
+                log "WARN" "Hetzner typically uses /26 or /29 subnets - verify with Hetzner"
+            fi
+            
+            log "INFO" "✓ Additional IP $ip validated (MAC: $mac, /$cidr)"
+        done
+        
+        log "INFO" "✓ All additional IPs validated for Hetzner requirements"
+    else
+        log "INFO" "No additional IPs configured - skipping Hetzner-specific validation"
+    fi
+    
+    return 0
 }
 
 # Convert netmask to CIDR notation
@@ -1507,7 +1567,7 @@ EOF
     log "INFO" "Proxmox system configured for pfSense integration"
     log "INFO" "Network bridges will be available after network restart:"
     log "INFO" "  - vmbr0: WAN bridge (connected to $SSH_INTERFACE)"
-    log "INFO" "  - vmbr1: LAN bridge (192.168.1.254/24) - Proxmox management of pfSense LAN"
+    log "INFO" "  - vmbr1: LAN bridge (192.168.1.10/24) - Host IP in pfSense LAN network"
     log "INFO" "  - vmbr2: DMZ bridge (10.0.2.1/24)"
     
 }
@@ -1524,18 +1584,18 @@ ensure_network_configuration() {
         local vmbr1_ip
         vmbr1_ip=$(ip addr show vmbr1 | grep "inet " | awk '{print $2}' | cut -d'/' -f1 | head -n1 || true)
         
-        if [[ "$vmbr1_ip" != "192.168.1.254" ]]; then
+        if [[ "$vmbr1_ip" != "192.168.1.10" ]]; then
             log "INFO" "Configuring vmbr1 with correct IP address..."
-            if [[ -n "$vmbr1_ip" && "$vmbr1_ip" != "192.168.1.254" ]]; then
+            if [[ -n "$vmbr1_ip" && "$vmbr1_ip" != "192.168.1.10" ]]; then
                 # Remove incorrect IP
                 ip addr del "${vmbr1_ip}/24" dev vmbr1 2>/dev/null || true
             fi
             
             # Add correct IP
-            if ip addr add 192.168.1.254/24 dev vmbr1 2>/dev/null; then
-                log "INFO" "✓ Added IP 192.168.1.254/24 to vmbr1"
+            if ip addr add 192.168.1.10/24 dev vmbr1 2>/dev/null; then
+                log "INFO" "✓ Added IP 192.168.1.10/24 to vmbr1"
             else
-                log "DEBUG" "IP 192.168.1.254/24 already exists on vmbr1"
+                log "DEBUG" "IP 192.168.1.10/24 already exists on vmbr1"
             fi
         else
             log "INFO" "✓ vmbr1 already has correct IP: $vmbr1_ip"
@@ -1724,100 +1784,6 @@ ensure_network_configuration() {
     return 0
 }
 
-# Parse command line arguments
-parse_arguments() {
-    while [[ $# -gt 0 ]]; do
-        case $1 in
-            --reset)
-                RESET_TO_ARIADATA=true
-                shift
-                ;;
-            --help|-h)
-                show_usage
-                exit 0
-                ;;
-            *)
-                log "ERROR" "Unknown argument: $1"
-                show_usage
-                exit 1
-                ;;
-        esac
-    done
-}
-
-# Show usage information
-show_usage() {
-    echo "Usage: $0 [options]"
-    echo ""
-    echo "Network Configuration Script for Hetzner Proxmox"
-    echo ""
-    echo "Options:"
-    echo "  --reset     Reset to ariadata pve-install.sh compatible configuration"
-    echo "  --help, -h  Show this help message"
-    echo ""
-    echo "This script configures network bridges for pfSense and container networking:"
-    echo "  vmbr0: WAN bridge with host IP and additional IPs"
-    echo "  vmbr1: LAN bridge (192.168.1.254/24) - Proxmox management of pfSense LAN"
-    echo "  vmbr2: DMZ bridge (10.0.2.1/24)"
-    echo ""
-    echo "The script can be run multiple times safely."
-}
-
-# Show network status summary
-show_network_status() {
-    log "INFO" "=== Final Network Status ==="
-    
-    # Show all bridge interfaces
-    for bridge in vmbr0 vmbr1 vmbr2; do
-        if ip link show "$bridge" >/dev/null 2>&1; then
-            log "INFO" "Bridge $bridge:"
-            local bridge_state
-            bridge_state=$(ip link show "$bridge" | grep -o "state [A-Z]*" | awk '{print $2}')
-            log "INFO" "  State: ${bridge_state:-UNKNOWN}"
-            
-            # Show IP addresses
-            local bridge_addrs
-            bridge_addrs=$(ip addr show "$bridge" 2>/dev/null | grep "inet " || true)
-            if [[ -n "$bridge_addrs" ]]; then
-                echo "$bridge_addrs" | while IFS= read -r line; do
-                    log "INFO" "  $line"
-                done
-            else
-                log "INFO" "  No IP addresses"
-            fi
-            
-            # Show bridge ports if any
-            if [[ -d "/sys/class/net/$bridge/brif" ]]; then
-                local ports
-                ports=$(ls /sys/class/net/$bridge/brif/ 2>/dev/null | tr '\n' ' ')
-                if [[ -n "$ports" ]]; then
-                    log "INFO" "  Ports: $ports"
-                else
-                    log "INFO" "  Ports: none"
-                fi
-            fi
-        else
-            log "WARN" "Bridge $bridge: NOT FOUND"
-        fi
-        log "INFO" ""
-    done
-    
-    # Show routing table
-    log "INFO" "Default routes:"
-    local default_routes
-    default_routes=$(ip route | grep default || true)
-    if [[ -n "$default_routes" ]]; then
-        echo "$default_routes" | while IFS= read -r line; do
-            log "INFO" "  $line"
-        done
-    else
-        log "INFO" "  No default routes found"
-    fi
-    
-    # Ensure function always returns success
-    return 0
-}
-
 # Function to verify DMZ interface
 verify_dmz_interface() {
     log "INFO" "Verifying DMZ interface configuration..."
@@ -1898,6 +1864,9 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
         
         # Parse additional IP configurations
         parse_additional_ips
+        
+        # Validate Hetzner-specific requirements
+        validate_hetzner_config
         
         # Create and apply network configuration
         create_network_config
