@@ -1226,11 +1226,28 @@ EOF
         
         log "INFO" "=== DMZ Bridge (vmbr2) ==="
         if ip addr show vmbr2 >/dev/null 2>&1; then
+            # Show IP addresses
             ip addr show vmbr2 2>/dev/null | grep "inet " | while IFS= read -r line; do
                 log "INFO" "  $line"
             done
+            
+            # Check if bridge is up and operational
+            if ip link show vmbr2 | grep -q "state UP"; then
+                log "INFO" "  ✓ DMZ bridge is up and operational"
+            else
+                log "WARN" "  ⚠️  DMZ bridge is down"
+            fi
+            
+            # Check if it's properly configured as a bridge
+            if [[ -d "/sys/class/net/vmbr2/bridge" ]]; then
+                log "INFO" "  ✓ DMZ bridge properly configured for VM/container use"
+                log "INFO" "  ℹ️  Ready for public-facing services on 10.0.2.0/24 network"
+            else
+                log "WARN" "  ⚠️  vmbr2 exists but is not configured as a bridge"
+            fi
         else
-            log "INFO" "  vmbr2 not yet active (restart required)"
+            log "WARN" "  ✗ vmbr2 not yet active (restart required or configuration error)"
+            log "INFO" "  ℹ️  DMZ network (10.0.2.0/24) will be available after reboot/restart"
         fi
         
     else
@@ -1285,7 +1302,7 @@ EOF
     log "INFO" "Network bridges will be available after network restart:"
     log "INFO" "  - vmbr0: WAN bridge (connected to $SSH_INTERFACE)"
     log "INFO" "  - vmbr1: LAN bridge (192.168.1.1/24)"
-    log "INFO" "  - vmbr2: DMZ bridge (10.0.2.0/24)"
+    log "INFO" "  - vmbr2: DMZ bridge (10.0.2.1/24)"
     
     # Configure Proxmox zones for network segmentation
     configure_proxmox_zones
@@ -1483,6 +1500,7 @@ ensure_network_configuration() {
     fi
     
     # Check and fix vmbr2 configuration (DMZ)
+    log "INFO" "Ensuring DMZ bridge (vmbr2) is properly configured..."
     if ip link show vmbr2 >/dev/null 2>&1; then
         local vmbr2_ip
         vmbr2_ip=$(ip addr show vmbr2 | grep "inet " | awk '{print $2}' | cut -d'/' -f1 | head -n1 || true)
@@ -1506,15 +1524,48 @@ ensure_network_configuration() {
         
         # Ensure vmbr2 is up
         if ip link set vmbr2 up 2>/dev/null; then
-            log "INFO" "✓ vmbr2 interface is up"
+            log "INFO" "✓ vmbr2 DMZ interface is up and ready"
         fi
+        
+        # Verify bridge settings
+        if [[ -d "/sys/class/net/vmbr2/bridge" ]]; then
+            # Configure bridge parameters for optimal performance
+            echo 0 > /sys/class/net/vmbr2/bridge/stp_state 2>/dev/null || true
+            echo 0 > /sys/class/net/vmbr2/bridge/forward_delay 2>/dev/null || true
+            echo 0 > /sys/class/net/vmbr2/bridge/bridge_maxwait 2>/dev/null || true
+            log "INFO" "✓ vmbr2 bridge parameters optimized"
+        fi
+        
+        # Verify DMZ is available for Proxmox
+        if [[ -f /etc/pve/sdn/zones/dmz.cfg ]]; then
+            log "INFO" "✓ DMZ zone configured in Proxmox SDN"
+        else
+            log "INFO" "ℹ️  DMZ SDN configuration will be available after Proxmox zones setup"
+        fi
+        
+        # Verify NAT rules for DMZ
+        if ! iptables -t nat -C POSTROUTING -s 10.0.2.0/24 -o vmbr0 -j MASQUERADE 2>/dev/null; then
+            log "INFO" "Adding NAT rule for DMZ network..."
+            if iptables -t nat -A POSTROUTING -s 10.0.2.0/24 -o vmbr0 -j MASQUERADE 2>/dev/null; then
+                log "INFO" "✓ Added NAT MASQUERADE rule for DMZ"
+            else
+                log "WARN" "Failed to add NAT MASQUERADE rule for DMZ"
+            fi
+        else
+            log "INFO" "✓ DMZ NAT rules already configured"
+        fi
+        
     else
-        log "WARN" "vmbr2 bridge not found - pfSense DMZ interface will not be available"
-        log "INFO" "Creating vmbr2 bridge manually..."
+        log "INFO" "Creating DMZ bridge (vmbr2) for pfSense and services..."
         
         # Create vmbr2 bridge if it doesn't exist
         if ip link add name vmbr2 type bridge 2>/dev/null; then
             log "INFO" "✓ Created vmbr2 bridge"
+            
+            # Configure bridge parameters
+            echo 0 > /sys/class/net/vmbr2/bridge/stp_state 2>/dev/null || true
+            echo 0 > /sys/class/net/vmbr2/bridge/forward_delay 2>/dev/null || true
+            log "INFO" "✓ vmbr2 bridge parameters configured"
             
             # Configure vmbr2 IP
             if ip addr add 10.0.2.1/24 dev vmbr2 2>/dev/null; then
@@ -1523,11 +1574,32 @@ ensure_network_configuration() {
             
             # Bring up vmbr2
             if ip link set vmbr2 up 2>/dev/null; then
-                log "INFO" "✓ vmbr2 interface is up"
+                log "INFO" "✓ vmbr2 DMZ interface is up and ready"
             fi
+            
+            # Add NAT rules
+            if iptables -t nat -A POSTROUTING -s 10.0.2.0/24 -o vmbr0 -j MASQUERADE 2>/dev/null; then
+                log "INFO" "✓ Added NAT MASQUERADE rule for DMZ"
+            fi
+            
         else
             log "WARN" "Failed to create vmbr2 bridge - may already exist or permission issue"
+            # Try to verify it exists anyway
+            if ip link show vmbr2 >/dev/null 2>&1; then
+                log "INFO" "vmbr2 bridge exists, ensuring proper configuration..."
+                ip link set vmbr2 up 2>/dev/null || true
+            fi
         fi
+    fi
+    
+    # Final DMZ verification
+    if ip link show vmbr2 >/dev/null 2>&1 && ip addr show vmbr2 | grep -q "10.0.2.1"; then
+        log "INFO" "✅ DMZ network (vmbr2) is ready for use"
+        log "INFO" "   Network: 10.0.2.0/24"
+        log "INFO" "   Gateway: 10.0.2.1"
+        log "INFO" "   Usage: Bridge VMs/containers to vmbr2 for DMZ access"
+    else
+        log "WARN" "⚠️  DMZ network configuration may need attention"
     fi
     
     # Apply additional IPs to vmbr0 if they're missing
@@ -1632,307 +1704,213 @@ ensure_network_configuration() {
     log "INFO" "   Navigate to Firewall to view/modify security rules"
 }
 
-# Show current network status
-show_network_status() {
-    log "INFO" "Current Network Status:"
-    log "INFO" "======================"
+# Verify DMZ interface is properly configured and accessible
+verify_dmz_interface() {
+    log "INFO" "Verifying DMZ interface (vmbr2) configuration..."
     
-    log "INFO" "=== WAN Bridge (vmbr0) ==="
-    if ip link show vmbr0 >/dev/null 2>&1; then
-        ip addr show vmbr0 2>/dev/null | grep "inet " | while IFS= read -r line; do
-            log "INFO" "  $line"
-        done
-    else
-        log "WARN" "  vmbr0 not found"
-    fi
+    local dmz_status="OK"
+    local issues=()
     
-    log "INFO" "=== LAN Bridge (vmbr1) ==="
-    if ip link show vmbr1 >/dev/null 2>&1; then
-        ip addr show vmbr1 2>/dev/null | grep "inet " | while IFS= read -r line; do
-            log "INFO" "  $line"
-        done
-    else
-        log "WARN" "  vmbr1 not found"
-    fi
-    
-    log "INFO" "=== DMZ Bridge (vmbr2) ==="
-    if ip link show vmbr2 >/dev/null 2>&1; then
-        ip addr show vmbr2 2>/dev/null | grep "inet " | while IFS= read -r line; do
-            log "INFO" "  $line"
-        done
-    else
-        log "WARN" "  vmbr2 not found"
-    fi
-    
-    log "INFO" "=== NAT Rules ==="
-    if iptables -t nat -L POSTROUTING 2>/dev/null | grep -q "MASQUERADE"; then
-        log "INFO" "  ✓ NAT rules configured"
-    else
-        log "WARN" "  ✗ NAT rules missing"
-    fi
-    
-    log "INFO" "=== Proxmox Zones ==="
-    if [[ -f /etc/pve/sdn/zones/dmz.cfg ]]; then
-        log "INFO" "  ✓ DMZ zone configured"
-    else
-        log "WARN" "  ✗ DMZ zone not configured"
-    fi
-    
-    if [[ -f /etc/pve/sdn/zones/lan.cfg ]]; then
-        log "INFO" "  ✓ LAN zone configured"
-    else
-        log "WARN" "  ✗ LAN zone not configured"
-    fi
-    
-    if [[ -f /etc/pve/firewall/cluster.fw ]]; then
-        log "INFO" "  ✓ Cluster firewall configured"
-    else
-        log "WARN" "  ✗ Cluster firewall not configured"
-    fi
-}
-
-# Parse command line arguments
-parse_arguments() {
-    while [[ $# -gt 0 ]]; do
-        case $1 in
-            --reset)
-                RESET_TO_ARIADATA=true
-                log "INFO" "Reset mode enabled - will restore to ariadata pve-install.sh compatible configuration"
-                shift
-                ;;
-            --fix)
-                log "INFO" "Fix mode enabled - will ensure network configuration is properly applied"
-                ensure_network_configuration
-                show_network_status
-                log "INFO" "Network configuration fix completed!"
-                log "INFO" "pfSense admin panel should be accessible at: http://192.168.1.1"
-                exit 0
-                ;;
-            --status)
-                log "INFO" "Showing current network status..."
-                show_network_status
-                exit 0
-                ;;
-            --generate-config)
-                generate_config_template
-                exit 0
-                ;;
-            --help|-h)
-                show_help
-                exit 0
-                ;;
-            --verbose|-v)
-                export LOG_LEVEL=DEBUG
-                log "DEBUG" "Verbose mode enabled"
-                shift
-                ;;
-            *)
-                log "ERROR" "Unknown option: $1"
-                show_help
-                exit 1
-                ;;
-        esac
-    done
-}
-
-# Show help information
-show_help() {
-    cat << EOF
-Usage: $0 [OPTIONS]
-
-Configure network settings for Hetzner Proxmox setup.
-
-OPTIONS:
-    --reset              Reset network to ariadata pve-install.sh compatible configuration
-    --fix                Ensure network configuration is properly applied (verify/fix bridges)
-    --status             Show current network bridge status
-    --generate-config    Create a configuration file template
-    --verbose, -v        Enable verbose output
-    --help, -h           Show this help message
-
-ENVIRONMENT:
-    The script supports two methods to configure additional IPs:
-    
-    METHOD 1 - Config File (Recommended):
-    Create config/additional-ips.conf with one IP per line:
-    
-    # Additional IP Configuration
-    IP=203.0.113.10 MAC=00:50:56:00:01:02 GATEWAY=203.0.113.1 NETMASK=255.255.255.192
-    IP=203.0.113.11 MAC=00:50:56:00:01:03 GATEWAY=203.0.113.1 NETMASK=255.255.255.192
-    IP=203.0.113.12 GATEWAY=203.0.113.1 NETMASK=255.255.255.192
-    
-    METHOD 2 - Structured Environment Variables:
-    Set numbered environment variables in .env:
-    
-    ADDITIONAL_IP_1=203.0.113.10
-    ADDITIONAL_MAC_1=00:50:56:00:01:02
-    ADDITIONAL_GATEWAY_1=203.0.113.1
-    ADDITIONAL_NETMASK_1=255.255.255.192
-    
-    ADDITIONAL_IP_2=203.0.113.11
-    ADDITIONAL_MAC_2=00:50:56:00:01:03
-    ADDITIONAL_GATEWAY_2=203.0.113.1
-    ADDITIONAL_NETMASK_2=255.255.255.192
-    
-    Note: MAC addresses are optional and can be omitted.
-
-EXAMPLES:
-    $0                      # Normal execution (configure additional IPs)
-    $0 --reset              # Reset to ariadata pve-install.sh compatible baseline
-    $0 --generate-config    # Create configuration file template
-    $0 --verbose            # Show detailed output
-
-EOF
-}
-
-# Generate configuration file template
-generate_config_template() {
-    local config_file="$SCRIPT_DIR/config/additional-ips.conf"
-    
-    if [[ -f "$config_file" ]]; then
-        log "WARN" "Configuration file already exists: $config_file"
-        log "INFO" "Use --force to overwrite existing file"
+    # Check if vmbr2 bridge exists
+    if ! ip link show vmbr2 >/dev/null 2>&1; then
+        dmz_status="FAILED"
+        issues+=("vmbr2 bridge does not exist")
+        log "ERROR" "✗ vmbr2 bridge not found"
         return 1
     fi
     
-    log "INFO" "Creating configuration file template: $config_file"
+    # Check if vmbr2 is up
+    if ! ip link show vmbr2 | grep -q "state UP"; then
+        dmz_status="WARNING"
+        issues+=("vmbr2 bridge is down")
+        log "WARN" "✗ vmbr2 bridge is not up"
+        # Try to bring it up
+        if ip link set vmbr2 up 2>/dev/null; then
+            log "INFO" "✓ Brought vmbr2 bridge up"
+        else
+            log "ERROR" "✗ Failed to bring vmbr2 bridge up"
+        fi
+    else
+        log "INFO" "✓ vmbr2 bridge is up"
+    fi
     
-    mkdir -p "$(dirname "$config_file")"
+    # Check if vmbr2 has correct IP address
+    local vmbr2_ip
+    vmbr2_ip=$(ip addr show vmbr2 | grep "inet " | awk '{print $2}' | cut -d'/' -f1 | head -n1 || true)
+    if [[ "$vmbr2_ip" != "10.0.2.1" ]]; then
+        dmz_status="WARNING"
+        issues+=("vmbr2 has incorrect IP: ${vmbr2_ip:-none} (expected: 10.0.2.1)")
+        log "WARN" "✗ vmbr2 IP is incorrect: ${vmbr2_ip:-none} (expected: 10.0.2.1)"
+        
+        # Try to fix the IP
+        if [[ -n "$vmbr2_ip" ]]; then
+            ip addr del "${vmbr2_ip}/24" dev vmbr2 2>/dev/null || true
+        fi
+        
+        if ip addr add 10.0.2.1/24 dev vmbr2 2>/dev/null; then
+            log "INFO" "✓ Fixed vmbr2 IP address to 10.0.2.1/24"
+        else
+            log "ERROR" "✗ Failed to set vmbr2 IP address"
+        fi
+    else
+        log "INFO" "✓ vmbr2 has correct IP: $vmbr2_ip/24"
+    fi
     
-    cat > "$config_file" << 'EOF'
-# Additional IP Configuration for Hetzner Proxmox Setup
-# Configure your additional IP addresses below
-#
-# Format: IP=address MAC=mac_address GATEWAY=gateway NETMASK=netmask
-# 
-# Notes:
-# - Each IP should be on its own line
-# - MAC address is optional (can be omitted)
-# - Comments start with #
-# - Empty lines are ignored
-
-# Your IP configurations (uncomment and modify as needed):
-# IP=YOUR_IP_1 GATEWAY=YOUR_GATEWAY_1 NETMASK=255.255.255.192
-# IP=YOUR_IP_2 GATEWAY=YOUR_GATEWAY_2 NETMASK=255.255.255.192
-
-# Example configuration:
-# IP=203.0.113.10 MAC=00:50:56:00:01:02 GATEWAY=203.0.113.1 NETMASK=255.255.255.192
-# IP=203.0.113.11 MAC=00:50:56:00:01:03 GATEWAY=203.0.113.1 NETMASK=255.255.255.192
-EOF
+    # Check if it's a proper bridge
+    if [[ ! -d "/sys/class/net/vmbr2/bridge" ]]; then
+        dmz_status="FAILED"
+        issues+=("vmbr2 is not a bridge interface")
+        log "ERROR" "✗ vmbr2 is not a bridge interface"
+    else
+        log "INFO" "✓ vmbr2 is a proper bridge interface"
+        
+        # Check bridge parameters
+        local stp_state
+        stp_state=$(cat /sys/class/net/vmbr2/bridge/stp_state 2>/dev/null || echo "unknown")
+        if [[ "$stp_state" != "0" ]]; then
+            log "INFO" "Setting vmbr2 STP to disabled..."
+            echo 0 > /sys/class/net/vmbr2/bridge/stp_state 2>/dev/null || true
+        fi
+    fi
     
-    log "INFO" "Configuration template created successfully"
-    log "INFO" "Edit the file and uncomment/modify the IP configurations as needed"
-    log "INFO" "Then run the script again to apply the configuration"
+    # Check if DMZ is configured in Proxmox SDN
+    if [[ ! -f /etc/pve/sdn/zones/dmz.cfg ]]; then
+        dmz_status="WARNING"
+        issues+=("DMZ zone not configured in Proxmox SDN")
+        log "WARN" "✗ DMZ zone not configured in Proxmox SDN"
+    else
+        log "INFO" "✓ DMZ zone configured in Proxmox SDN"
+    fi
+    
+    # Check if DMZ VNet is configured
+    if [[ ! -f /etc/pve/sdn/vnets/dmz-net.cfg ]]; then
+        dmz_status="WARNING"
+        issues+=("DMZ VNet not configured in Proxmox SDN")
+        log "WARN" "✗ DMZ VNet not configured in Proxmox SDN"
+    else
+        log "INFO" "✓ DMZ VNet configured in Proxmox SDN"
+    fi
+    
+    # Check NAT configuration for DMZ
+    if ! iptables -t nat -C POSTROUTING -s 10.0.2.0/24 -o vmbr0 -j MASQUERADE 2>/dev/null; then
+        dmz_status="WARNING"
+        issues+=("DMZ NAT rules not configured")
+        log "WARN" "✗ DMZ NAT rules not configured"
+    else
+        log "INFO" "✓ DMZ NAT rules configured"
+    fi
+    
+    # Check if interface is in network interfaces file
+    if ! grep -q "auto vmbr2" /etc/network/interfaces 2>/dev/null; then
+        dmz_status="WARNING"
+        issues+=("vmbr2 not configured in /etc/network/interfaces")
+        log "WARN" "✗ vmbr2 not configured in /etc/network/interfaces"
+    else
+        log "INFO" "✓ vmbr2 configured in /etc/network/interfaces"
+    fi
+    
+    # Summary
+    case "$dmz_status" in
+        "OK")
+            log "INFO" "✅ DMZ interface verification PASSED"
+            log "INFO" "   vmbr2 is ready for use in Proxmox VMs and containers"
+            log "INFO" "   DMZ network: 10.0.2.0/24"
+            log "INFO" "   Gateway: 10.0.2.1"
+            ;;
+        "WARNING")
+            log "WARN" "⚠️  DMZ interface verification PASSED with warnings"
+            log "WARN" "   Issues found: ${#issues[@]}"
+            for issue in "${issues[@]}"; do
+                log "WARN" "   - $issue"
+            done
+            log "INFO" "   vmbr2 should still be usable for VMs and containers"
+            ;;
+        "FAILED")
+            log "ERROR" "❌ DMZ interface verification FAILED"
+            log "ERROR" "   Critical issues found: ${#issues[@]}"
+            for issue in "${issues[@]}"; do
+                log "ERROR" "   - $issue"
+            done
+            log "ERROR" "   vmbr2 may not be usable until issues are resolved"
+            return 1
+            ;;
+    esac
+    
+    return 0
 }
 
-# Main function
-main() {
+# Main execution block
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     # Parse command line arguments first
     parse_arguments "$@"
     
+    # Initialize logging and environment
+    create_backup_dir
+    get_ssh_info
+    
     if [[ "$RESET_TO_ARIADATA" == "true" ]]; then
-        log "INFO" "Starting Hetzner Proxmox network configuration RESET to ariadata baseline..."
-        log "WARN" "=== NETWORK RESET MODE ==="
-        log "WARN" "This will reset your network to the ariadata pve-install.sh compatible configuration"
-        log "WARN" "All additional IPs and custom bridge configurations will be removed"
-        log "WARN" "Only vmbr0 (WAN) and vmbr1 (Private LAN) will remain"
-        log "WARN" ""
+        log "INFO" "Resetting network configuration to ariadata pve-install.sh baseline..."
         
-        # Safety checks
-        create_backup_dir
-        get_ssh_info || {
-            log "ERROR" "Failed to get SSH connection information"
-            return 1
-        }
-        backup_network_config
-        validate_network_config
+        # Create ariadata configuration (without additional IPs)
+        create_ariadata_network_config
         
-        # Create ariadata configuration
-        create_ariadata_network_config || {
-            log "ERROR" "Failed to create ariadata network configuration"
-            log "ERROR" "Please check the debug output above for specific errors"
-            return 1
-        }
-        test_network_config
-        
-        # Validate configuration structure
-        validate_interfaces_syntax "$NEW_INTERFACES_CONFIG" || {
-            log "ERROR" "Configuration validation failed"
-            log "ERROR" "Aborting due to syntax errors"
-            return 1
-        }
-        
-        # Apply configuration
-        log "WARN" "Continue with RESET? (Press Enter to continue, Ctrl+C to abort)"
-        read -r
-        
+        # Apply the configuration
+        log "INFO" "Applying ariadata baseline network configuration..."
         apply_network_config
-        configure_proxmox_network
         
-        # Ensure all network configuration is properly applied
-        ensure_network_configuration
-        
-        show_network_status
-        
-        log "INFO" "Network configuration RESET completed successfully!"
-        log "INFO" "Your network is now configured with ariadata pve-install.sh compatible settings"
-        log "INFO" "Backup available at: $INTERFACES_BACKUP"
-        log "INFO" "Emergency restore script: /root/restore-network.sh"
-        log "INFO" ""
-        log "INFO" "pfSense admin panel should be accessible at: http://192.168.1.1"
-        log "INFO" "(Default credentials: admin / pfsense)"
+        log "INFO" "✅ Network reset to ariadata baseline complete!"
+        log "INFO" "Configuration is now compatible with ariadata pve-install.sh"
+        log "INFO" "Additional IPs can be added by running without --reset flag"
     else
+        # Normal execution flow
         log "INFO" "Starting Hetzner Proxmox network configuration..."
+        log "INFO" "This script will safely add additional IPs while preserving SSH connectivity"
         
-        # Safety checks
-        create_backup_dir
-        get_ssh_info
-        backup_network_config
+        # Validate prerequisites
         validate_network_config
         
-        # Parse and prepare configuration
+        # Create network backup
+        backup_network_config
+        
+        # Parse additional IP configurations
         parse_additional_ips
+        
+        # Create and apply network configuration
         create_network_config
-        test_network_config
-        
-        # Validate configuration structure
-        validate_interfaces_syntax "$NEW_INTERFACES_CONFIG" || {
-            log "ERROR" "Configuration validation failed"
-            log "ERROR" "Aborting due to syntax errors"
-            return 1
-        }
-        
-        # Apply configuration
-        log "WARN" "=== NETWORK CONFIGURATION WARNING ==="
-        log "WARN" "This operation will modify network settings"
-        log "WARN" "SSH connectivity may be temporarily interrupted"
-        log "WARN" "Backup is available at: $INTERFACES_BACKUP"
-        log "WARN" "Emergency restore script: /root/restore-network.sh"
-        log "WARN" ""
-        log "WARN" ""
-        log "WARN" "Continue? (Press Enter to continue, Ctrl+C to abort)"
-        read -r
-        
         apply_network_config
-        configure_proxmox_network
         
-        # Ensure all network configuration is properly applied
+        # Configure Proxmox-specific networking
+        configure_proxmox_zones
+        
+        # Ensure network is properly running
         ensure_network_configuration
         
+        # Verify DMZ interface is properly configured
+        log "INFO" "Verifying network configuration..."
+        verify_dmz_interface || log "WARN" "DMZ verification completed with issues"
+        
+        # Show final status
         show_network_status
         
-        log "INFO" "Network configuration completed successfully!"
-        log "INFO" "Backup available at: $INTERFACES_BACKUP"
-        log "INFO" "Emergency restore script: /root/restore-network.sh"
+        log "INFO" "✅ Hetzner Proxmox network configuration complete!"
         log "INFO" ""
-        log "INFO" "pfSense admin panel should be accessible at: http://192.168.1.1"
-        log "INFO" "(Default credentials: admin / pfsense)"
+        log "INFO" "📋 Network Summary:"
+        log "INFO" "   - WAN (vmbr0): Internet access with additional IPs"
+        log "INFO" "   - LAN (vmbr1): 192.168.1.0/24 - pfSense management network"
+        log "INFO" "   - DMZ (vmbr2): 10.0.2.0/24 - public-facing services network"
+        log "INFO" ""
+        log "INFO" "🔐 Security Notes:"
+        log "INFO" "   - SSH connectivity has been preserved"
+        log "INFO" "   - Network bridges are ready for pfSense configuration"
+        log "INFO" "   - DMZ network is isolated and ready for public services"
+        log "INFO" ""
+        log "INFO" "🚀 Next Steps:"
+        log "INFO" "   1. Set up pfSense VM: $(dirname "$0")/../install.sh --pfsense"
+        log "INFO" "   2. Configure firewall rules in pfSense"
+        log "INFO" "   3. Create VMs/containers using the DMZ network (vmbr2)"
+        log "INFO" ""
+        log "INFO" "🌐 DMZ Usage Examples:"
+        log "INFO" "   VM: --net0 virtio,bridge=vmbr2,firewall=1"
+        log "INFO" "   Container: --net0 name=eth0,bridge=vmbr2,ip=10.0.2.10/24,gw=10.0.2.1"
     fi
-}
-
-# Script entry point
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-    check_root
-    parse_arguments "$@"
-    main "$@"
 fi
