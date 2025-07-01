@@ -835,8 +835,6 @@ netmask_to_cidr() {
     local netmask="$1"
     local cidr=0
     
-    log "DEBUG" "Converting netmask: $netmask"
-    
     case "$netmask" in
         "255.255.255.255") cidr=32 ;;
         "255.255.255.254") cidr=31 ;;
@@ -856,12 +854,10 @@ netmask_to_cidr() {
         "255.255.128.0") cidr=17 ;;
         "255.255.0.0") cidr=16 ;;
         *) 
-            log "ERROR" "Unknown netmask: $netmask"
             cidr=24  # Default fallback
             ;;
     esac
     
-    log "DEBUG" "Converted to CIDR: $cidr"
     echo "$cidr"
 }
 
