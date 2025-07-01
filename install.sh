@@ -477,7 +477,8 @@ run_setup_mirrors() {
     if [[ ${#command_args[@]} -gt 0 ]]; then
         run_script "scripts/setup-mirrors.sh" "${command_args[@]}"
     else
-        run_script "scripts/setup-mirrors.sh"
+        # When called from install.sh without arguments, run in non-interactive mode
+        run_script "scripts/setup-mirrors.sh" "--yes"
     fi
     
     log "INFO" "✅ Drive Mirror Configuration Complete!"

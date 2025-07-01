@@ -5,25 +5,48 @@
 # Focuses on ZFS-only setup, removing legacy RAID complexity
 
 # Use less aggressive error handling to prevent premature exits
-set -euo pipefail
+set -uo pipefail
 
+# Disable exit on error for the error handler itself
+set +e
 # Custom error handler that doesn't immediately exit
 error_handler() {
     local line_no=$1 error_code=$2
-    log "ERROR" "Script encountered an error at line $line_no with exit code $error_code"
-    log "ERROR" "Last command: ${BASH_COMMAND}"
-    log "ERROR" "This error occurred in the setup-mirrors script"
+    
+    # Use echo if log function is not available yet
+    if command -v log >/dev/null 2>&1; then
+        log "ERROR" "Script encountered an error at line $line_no with exit code $error_code"
+        log "ERROR" "Last command: ${BASH_COMMAND}"
+        log "ERROR" "This error occurred in the setup-mirrors script"
+    else
+        echo "ERROR: Script encountered an error at line $line_no with exit code $error_code" >&2
+        echo "ERROR: Last command: ${BASH_COMMAND}" >&2
+        echo "ERROR: This error occurred in the setup-mirrors script" >&2
+    fi
     
     # Show context around the failing line
     if [[ -f "${BASH_SOURCE[0]}" ]]; then
-        log "DEBUG" "Context around line $line_no:"
+        if command -v log >/dev/null 2>&1; then
+            log "DEBUG" "Context around line $line_no:"
+        else
+            echo "DEBUG: Context around line $line_no:" >&2
+        fi
         sed -n "$((line_no-2)),$((line_no+2))p" "${BASH_SOURCE[0]}" | nl -v$((line_no-2)) 2>/dev/null || true
     fi
     
     # Don't exit immediately - let the script handle the error
-    log "WARN" "Attempting to continue execution..."
+    if command -v log >/dev/null 2>&1; then
+        log "WARN" "Attempting to continue execution..."
+    else
+        echo "WARN: Attempting to continue execution..." >&2
+    fi
+    
+    # Return without exiting - let the calling function handle the error
+    return "$error_code"
 }
 trap 'error_handler ${LINENO} $?' ERR
+# Keep pipefail and undefined variable checking, but don't exit on errors automatically
+set -uo pipefail
 
 # Get script directory and source common functions
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -35,6 +58,7 @@ source "$PROJECT_ROOT/lib/common.sh"
 declare -a AVAILABLE_DRIVES=()
 declare -a DRIVE_SIZES=()
 declare -a MIRROR_GROUPS=()
+FORCE_YES="false"
 
 # Enhanced drive detection with better filtering
 detect_drives() {
@@ -118,7 +142,12 @@ detect_drives() {
     elif [[ ${#available_drives[@]} -eq 0 ]]; then
         log "INFO" "No unused drives found. Only drives already in ZFS pools are available."
         echo
-        read -p "Do you want to work with drives already in ZFS pools? (y/N): " -r confirm
+        if [[ "$FORCE_YES" == "true" ]]; then
+            log "INFO" "Auto-selecting option 1: Only unused drives (non-interactive mode)"
+            confirm="n"
+        else
+            read -p "Do you want to work with drives already in ZFS pools? (y/N): " -r confirm </dev/tty
+        fi
         if [[ "$confirm" =~ ^[Yy]$ ]]; then
             AVAILABLE_DRIVES=("${zfs_drives[@]}")
             DRIVE_SIZES=("${zfs_sizes[@]}")
@@ -132,7 +161,12 @@ detect_drives() {
         log "INFO" "  1) Only unused drives (${#available_drives[@]} drives)"
         log "INFO" "  2) Both unused drives AND drives already in ZFS pools (${#available_drives[@]} + ${#zfs_drives[@]} drives)"
         echo
-        read -p "Choose option (1-2): " -r choice
+        if [[ "$FORCE_YES" == "true" ]]; then
+            log "INFO" "Auto-selecting option 1: Only unused drives (non-interactive mode)"
+            choice="1"
+        else
+            read -p "Choose option (1-2): " -r choice </dev/tty
+        fi
         case $choice in
             1)
                 AVAILABLE_DRIVES=("${available_drives[@]}")
@@ -240,6 +274,8 @@ check_current_storage() {
     else
         log "INFO" "ZFS not installed"
     fi
+    
+    return 0
 }
 
 # Install ZFS if needed
@@ -413,7 +449,12 @@ create_zfs_mirror() {
             log "WARN" "Drive $drive has filesystem: $fstype"
             if [[ "$fstype" =~ ^(ext[234]|xfs|btrfs|ntfs)$ ]]; then
                 log "WARN" "This appears to contain data. Continuing will destroy it."
-                read -p "Wipe $drive? (y/N): " -r confirm
+                if [[ "$FORCE_YES" == "true" ]]; then
+                    log "INFO" "Auto-confirming drive wipe (non-interactive mode)"
+                    confirm="y"
+                else
+                    read -p "Wipe $drive? (y/N): " -r confirm </dev/tty
+                fi
                 if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
                     log "INFO" "Skipping $drive"
                     return 1
@@ -491,7 +532,12 @@ create_zfs_single() {
         log "WARN" "Drive $drive has filesystem: $fstype"
         if [[ "$fstype" =~ ^(ext[234]|xfs|btrfs|ntfs)$ ]]; then
             log "WARN" "This appears to contain data. Continuing will destroy it."
-            read -p "Wipe $drive? (y/N): " -r confirm
+            if [[ "$FORCE_YES" == "true" ]]; then
+                log "INFO" "Auto-confirming drive wipe (non-interactive mode)"
+                confirm="y"
+            else
+                read -p "Wipe $drive? (y/N): " -r confirm </dev/tty
+            fi
             if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
                 log "INFO" "Skipping $drive"
                 return 1
@@ -627,7 +673,12 @@ confirm_system_mirror() {
     log "WARN" "Drives: ${drives[*]}"
     log "WARN" "This creates a ZFS mirror including your system drive."
     echo
-    read -p "Continue with system drive mirroring? (y/N): " -r confirm
+    if [[ "$FORCE_YES" == "true" ]]; then
+        log "INFO" "Auto-confirming system drive mirroring (non-interactive mode)"
+        confirm="y"
+    else
+        read -p "Continue with system drive mirroring? (y/N): " -r confirm </dev/tty
+    fi
     [[ "$confirm" =~ ^[Yy]$ ]]
 }
 
@@ -642,12 +693,14 @@ show_final_status() {
     
     # Proxmox storage
     log "INFO" "Proxmox Storage:"
-    pvesm status | grep -E "(zfs-|Type)" || log "INFO" "No ZFS storage in Proxmox"
+    pvesm status 2>/dev/null | grep -E "(zfs-|Type)" || log "INFO" "No ZFS storage in Proxmox"
     echo
     
     log "INFO" "✅ ZFS storage setup completed!"
     log "INFO" "Configure network: ./install.sh --network"
     log "INFO" "Install Caddy: ./install.sh --caddy"
+    
+    return 0
 }
 
 # Main execution
@@ -660,6 +713,12 @@ main() {
                 log "INFO" "Note: --force-zfs-drives is now handled interactively"
                 shift
                 ;;
+            --yes|-y|--force)
+                # Non-interactive mode - automatically confirm prompts
+                FORCE_YES="true"
+                log "INFO" "Running in non-interactive mode"
+                shift
+                ;;
             --help|-h)
                 cat << EOF
 Usage: $0 [OPTIONS]
@@ -669,6 +728,7 @@ Set up ZFS mirrors for Proxmox storage.
 This script is now interactive and will ask you which drives to use.
 
 OPTIONS:
+    --yes, -y, --force  Run in non-interactive mode (auto-confirm prompts)
     --help               Show this help message
 
 EOF
@@ -705,30 +765,56 @@ EOF
         exit 1
     fi
     
-    check_current_storage
+    if ! check_current_storage; then
+        log "WARN" "Could not check current storage status, but continuing..."
+    fi
     
     # Show proposed configuration
     echo
     log "INFO" "=== PROPOSED ZFS CONFIGURATION ==="
+    log "DEBUG" "Number of mirror groups: ${#MIRROR_GROUPS[@]}"
     local storage_count=0
     for i in "${!MIRROR_GROUPS[@]}"; do
-        read -ra drives <<< "${MIRROR_GROUPS[i]}"
+        local mirror_group="${MIRROR_GROUPS[i]}"
+        log "DEBUG" "Processing mirror group $i: '$mirror_group'"
+        
+        # Safely parse drives from mirror group
+        local drives=()
+        if [[ -n "$mirror_group" ]]; then
+            read -ra drives <<< "$mirror_group"
+        fi
+        
+        log "DEBUG" "Drives in group $i: ${drives[*]} (count: ${#drives[@]})"
         if [[ ${#drives[@]} -eq 2 ]]; then
             log "INFO" "  ZFS Mirror $i: ${drives[0]} + ${drives[1]}"
             ((storage_count++))
-        else
+        elif [[ ${#drives[@]} -eq 1 ]]; then
             log "INFO" "  ZFS Pool $i: ${drives[0]}"
             ((storage_count++))
+        else
+            log "WARN" "Skipping invalid mirror group $i with ${#drives[@]} drives"
         fi
     done
     log "INFO" "Total: $storage_count storage pools will be created"
     
+    log "DEBUG" "About to prompt user for confirmation..."
     echo
-    read -p "Proceed with ZFS configuration? (y/N): " -r confirm
+    # Try to read from TTY first, fallback to stdin if that fails
+    if [[ "$FORCE_YES" == "true" ]]; then
+        log "INFO" "Auto-confirming ZFS configuration (non-interactive mode)"
+        confirm="y"
+    elif [[ -t 0 ]] && [[ -c /dev/tty ]]; then
+        read -p "Proceed with ZFS configuration? (y/N): " -r confirm </dev/tty
+    else
+        echo -n "Proceed with ZFS configuration? (y/N): "
+        read -r confirm
+    fi
     if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
         log "INFO" "Configuration cancelled by user"
         exit 0
     fi
+    
+    log "DEBUG" "User confirmed, proceeding with configuration..."
     
     # Execute configuration
     log "INFO" "Starting ZFS pool creation process..."
@@ -747,6 +833,8 @@ EOF
     
     log "INFO" "✅ Setup completed!"
     log "INFO" "Check the final status above for details of what was created"
+    
+    return 0
 }
 
 # Run main if executed directly
