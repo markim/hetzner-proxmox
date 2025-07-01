@@ -413,8 +413,8 @@ EOF
 create_network_config() {
     log "INFO" "Creating new network configuration..."
     
-    # Check if we should use ariadata-compatible base configuration
-    local use_ariadata_base=false
+    # Always use ariadata-compatible configuration for consistency with pfSense
+    # This ensures all IPs are attached to vmbr0 for proper firewalling
     
     # Check for existing ariadata-style indicators in current config
     if [[ -f "$INTERFACES_FILE" ]]; then
@@ -423,15 +423,15 @@ create_network_config() {
            grep -q "bridge-vids 2-4094" "$INTERFACES_FILE"; then
             log "INFO" "Detected existing ariadata pve-install.sh style configuration"
             log "INFO" "Will maintain ariadata compatibility while adding additional IPs"
-            use_ariadata_base=true
+        else
+            log "INFO" "Converting to ariadata-compatible configuration for pfSense compatibility"
         fi
+    else
+        log "INFO" "Creating new ariadata-compatible configuration"
     fi
     
-    if [[ "$use_ariadata_base" == "true" ]]; then
-        create_ariadata_compatible_config
-    else
-        create_standard_network_config
-    fi
+    # Always use ariadata-compatible configuration
+    create_ariadata_compatible_config
 }
 
 # Create ariadata-compatible configuration with additional IPs
