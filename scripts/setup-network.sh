@@ -285,7 +285,7 @@ create_ariadata_network_config() {
     
     # Define private subnet for vmbr1 (pfSense compatible)
     local private_subnet="192.168.1.0/24"
-    local private_ip="192.168.1.1/24"
+    local private_ip="192.168.1.254/24"  # Use .254 to avoid conflict with pfSense LAN IP (.1)
     local first_ipv6=""
     if [[ -n "$current_ipv6" ]]; then
         # Generate first IPv6 CIDR similar to ariadata format
@@ -486,7 +486,7 @@ create_network_config () {
 # Automatically generated on: $(date)
 # This configuration provides exactly 3 network bridges:
 #   vmbr0: WAN bridge with host IP and additional IPs
-#   vmbr1: LAN bridge (192.168.1.1/24) for pfSense management
+#   vmbr1: LAN bridge (192.168.1.254/24) for pfSense management network
 #   vmbr2: DMZ bridge (10.0.2.1/24) for public services
 
 source /etc/network/interfaces.d/*
@@ -533,7 +533,7 @@ EOF
 # LAN Bridge (vmbr1) - pfSense management network
 auto vmbr1
 iface vmbr1 inet static
-    address 192.168.1.1/24
+    address 192.168.1.254/24  # Use .254 to avoid conflict with pfSense LAN IP (.1)
     bridge-ports none
     bridge-stp off
     bridge-fd 0
@@ -655,7 +655,7 @@ create_ariadata_compatible_config() {
     
     # Define private subnet for vmbr1 (pfSense compatible)
     local private_subnet="192.168.1.0/24"
-    local private_ip="192.168.1.1/24"
+    local private_ip="192.168.1.254/24"  # Use .254 to avoid conflict with pfSense LAN IP (.1)
     local first_ipv6=""
     if [[ -n "$current_ipv6" ]]; then
         log "DEBUG" "Processing IPv6 configuration"
@@ -945,7 +945,7 @@ EOF
 # LAN Bridge for internal networking (pfSense LAN side)
 auto vmbr1
 iface vmbr1 inet static
-    address 192.168.1.1/24
+    address 192.168.1.254/24  # Use .254 to avoid conflict with pfSense LAN IP (.1)
     bridge-ports none
     bridge-stp off
     bridge-fd 0
@@ -967,7 +967,7 @@ EOF
 # LAN Bridge for internal networking (pfSense LAN side)
 auto vmbr1
 iface vmbr1 inet static
-    address 192.168.1.1/24
+    address 192.168.1.254/24  # Use .254 to avoid conflict with pfSense LAN IP (.1)
     bridge-ports none
     bridge-stp off
     bridge-fd 0
@@ -1484,7 +1484,7 @@ EOF
     log "INFO" "Proxmox system configured for pfSense integration"
     log "INFO" "Network bridges will be available after network restart:"
     log "INFO" "  - vmbr0: WAN bridge (connected to $SSH_INTERFACE)"
-    log "INFO" "  - vmbr1: LAN bridge (192.168.1.1/24)"
+    log "INFO" "  - vmbr1: LAN bridge (192.168.1.254/24) - Proxmox management of pfSense LAN"
     log "INFO" "  - vmbr2: DMZ bridge (10.0.2.1/24)"
     
 }
@@ -1501,18 +1501,18 @@ ensure_network_configuration() {
         local vmbr1_ip
         vmbr1_ip=$(ip addr show vmbr1 | grep "inet " | awk '{print $2}' | cut -d'/' -f1 | head -n1 || true)
         
-        if [[ "$vmbr1_ip" != "192.168.1.1" ]]; then
+        if [[ "$vmbr1_ip" != "192.168.1.254" ]]; then
             log "INFO" "Configuring vmbr1 with correct IP address..."
-            if [[ -n "$vmbr1_ip" && "$vmbr1_ip" != "192.168.1.1" ]]; then
+            if [[ -n "$vmbr1_ip" && "$vmbr1_ip" != "192.168.1.254" ]]; then
                 # Remove incorrect IP
                 ip addr del "${vmbr1_ip}/24" dev vmbr1 2>/dev/null || true
             fi
             
             # Add correct IP
-            if ip addr add 192.168.1.1/24 dev vmbr1 2>/dev/null; then
-                log "INFO" "✓ Added IP 192.168.1.1/24 to vmbr1"
+            if ip addr add 192.168.1.254/24 dev vmbr1 2>/dev/null; then
+                log "INFO" "✓ Added IP 192.168.1.254/24 to vmbr1"
             else
-                log "DEBUG" "IP 192.168.1.1/24 already exists on vmbr1"
+                log "DEBUG" "IP 192.168.1.254/24 already exists on vmbr1"
             fi
         else
             log "INFO" "✓ vmbr1 already has correct IP: $vmbr1_ip"
@@ -1731,7 +1731,7 @@ show_usage() {
     echo ""
     echo "This script configures network bridges for pfSense and container networking:"
     echo "  vmbr0: WAN bridge with host IP and additional IPs"
-    echo "  vmbr1: LAN bridge (192.168.1.1/24)"
+    echo "  vmbr1: LAN bridge (192.168.1.254/24) - Proxmox management of pfSense LAN"
     echo "  vmbr2: DMZ bridge (10.0.2.1/24)"
     echo ""
     echo "The script can be run multiple times safely."

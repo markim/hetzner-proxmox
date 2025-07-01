@@ -34,7 +34,7 @@ COMMANDS:
     --caddy             Install and configure Caddy with HTTPS (current functionality)
     --network           Configure network interfaces for additional Hetzner IPs
     --network --reset   Reset network configuration to base ariadata pve-install.sh configuration
-    --pfsense           Create and configure pfSense firewall VM (requires --network first)
+    --pfsense           Create and configure pfSense firewall VM with DMZ interface (requires --network first)
     --firewalladmin     Create Fedora container for firewall administration (requires --pfsense first)
     --check-mac         Verify MAC address configuration for additional IPs
 
@@ -224,6 +224,7 @@ validate_setup() {
                 log "ERROR" "  $0 --network"
                 exit 1
             fi
+            # Note: vmbr2 (DMZ interface) will be created automatically by the pfSense script
             ;;
         "firewalladmin")
             # Firewall admin specific validation is handled in the firewall admin script
@@ -466,11 +467,17 @@ run_pfsense_setup() {
     run_script "scripts/setup-pfsense.sh"
 
     log "INFO" "✅ pfSense Setup Complete!"
-    log "INFO" "pfSense VM has been created successfully"
+    log "INFO" "pfSense VM has been created successfully with DMZ interface (vmbr2)"
+    log "INFO" ""
+    log "INFO" "Network Configuration:"
+    log "INFO" "  - WAN Interface: vmbr0 (connected to internet)"
+    log "INFO" "  - LAN Interface: vmbr1 (internal network - 192.168.1.0/24)"
+    log "INFO" "  - DMZ Interface: vmbr2 (DMZ network - 10.0.2.0/24)"
     log "INFO" ""
     log "INFO" "Next Steps:"
     log "INFO" "1. Access pfSense via Proxmox console to complete initial setup"
-    log "INFO" "2. Create firewall admin VM: $0 --firewalladmin"
+    log "INFO" "2. Configure interfaces in pfSense (WAN/LAN/DMZ)"
+    log "INFO" "3. Create firewall admin VM: $0 --firewalladmin"
     log "INFO" ""
     log "INFO" "Logs are available at: $LOG_FILE"
 }
@@ -658,7 +665,7 @@ main() {
             log "INFO" "  --caddy          🌐 Install Caddy reverse proxy with HTTPS"
             log "INFO" "  --network        🔗 Configure network interfaces for additional IPs"
             log "INFO" "  --network --reset🔄 Reset to base ariadata pve-install.sh network configuration"
-            log "INFO" "  --pfsense        🔥 Create pfSense firewall VM (requires --network first)"
+            log "INFO" "  --pfsense        🔥 Create pfSense firewall VM with DMZ interface (requires --network first)"
             log "INFO" "  --firewalladmin  🖥️  Create firewall admin container (requires --pfsense first)"
             echo
             log "INFO" "Safety features:"
