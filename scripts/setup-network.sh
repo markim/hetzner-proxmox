@@ -1231,7 +1231,6 @@ EOF
     fi
 }
 
-
 # Configure Proxmox networking for containers and pfSense
 configure_proxmox_network() {
     log "INFO" "Configuring Proxmox system settings for pfSense integration..."
@@ -1280,19 +1279,112 @@ EOF
     log "INFO" "  - vmbr2: DMZ bridge (10.0.2.0/24)"
 }
 
-# Show network status
-show_network_status() {
-    log "INFO" "Current network status:"
-    echo
-    echo "=== Network Interfaces ==="
-    ip addr show | grep -E "(^[0-9]|inet )" | grep -v "127.0.0.1"
-    echo
-    echo "=== Routing Table ==="
-    ip route
-    echo
-    echo "=== DNS Configuration ==="
-    grep -v "^#" /etc/resolv.conf
-    echo
+# Ensure network configuration is properly applied
+ensure_network_configuration() {
+    log "INFO" "Ensuring network configuration is properly applied..."
+    
+    # Wait a moment for networking to settle
+    sleep 3
+    
+    # Check and fix vmbr1 configuration
+    if ip link show vmbr1 >/dev/null 2>&1; then
+        local vmbr1_ip
+        vmbr1_ip=$(ip addr show vmbr1 | grep "inet " | awk '{print $2}' | cut -d'/' -f1 | head -n1 || true)
+        
+        if [[ "$vmbr1_ip" != "192.168.1.1" ]]; then
+            log "INFO" "Configuring vmbr1 with correct IP address..."
+            if [[ -n "$vmbr1_ip" && "$vmbr1_ip" != "192.168.1.1" ]]; then
+                # Remove incorrect IP
+                ip addr del "${vmbr1_ip}/24" dev vmbr1 2>/dev/null || true
+            fi
+            
+            # Add correct IP
+            if ip addr add 192.168.1.1/24 dev vmbr1 2>/dev/null; then
+                log "INFO" "✓ Added IP 192.168.1.1/24 to vmbr1"
+            else
+                log "DEBUG" "IP 192.168.1.1/24 already exists on vmbr1"
+            fi
+        else
+            log "INFO" "✓ vmbr1 already has correct IP: $vmbr1_ip"
+        fi
+        
+        # Ensure vmbr1 is up
+        if ip link set vmbr1 up 2>/dev/null; then
+            log "INFO" "✓ vmbr1 interface is up"
+        fi
+    else
+        log "WARN" "vmbr1 bridge not found - pfSense LAN interface will not be available"
+    fi
+    
+    # Apply additional IPs to vmbr0 if they're missing
+    if ip link show vmbr0 >/dev/null 2>&1 && [[ -n "${ADDITIONAL_IPS_ARRAY[*]:-}" && ${#ADDITIONAL_IPS_ARRAY[@]} -gt 0 ]]; then
+        log "INFO" "Verifying additional IP addresses on vmbr0..."
+        
+        for i in "${!ADDITIONAL_IPS_ARRAY[@]}"; do
+            local ip="${ADDITIONAL_IPS_ARRAY[$i]}"
+            local gateway="${ADDITIONAL_GATEWAYS_ARRAY[$i]}"
+            local netmask="${ADDITIONAL_NETMASKS_ARRAY[$i]}"
+            
+            # Convert netmask to CIDR
+            local cidr
+            cidr=$(netmask_to_cidr "$netmask")
+            
+            # Check if IP is already configured
+            if ! ip addr show vmbr0 | grep -q "$ip"; then
+                log "INFO" "Adding missing IP $ip/$cidr to vmbr0..."
+                if ip addr add "$ip/$cidr" dev vmbr0 2>/dev/null; then
+                    log "INFO" "✓ Added IP $ip/$cidr to vmbr0"
+                else
+                    log "DEBUG" "IP $ip/$cidr already exists on vmbr0"
+                fi
+                
+                # Add route if gateway is different
+                if [[ "$gateway" != "$(ip route | grep default | awk '{print $3}' | head -n1)" ]]; then
+                    if ip route add "$ip" via "$gateway" dev vmbr0 2>/dev/null; then
+                        log "INFO" "✓ Added route for $ip via $gateway"
+                    else
+                        log "DEBUG" "Route for $ip via $gateway already exists"
+                    fi
+                fi
+            else
+                log "DEBUG" "IP $ip already configured on vmbr0"
+            fi
+        done
+    fi
+    
+    # Apply NAT rules for vmbr1 (pfSense LAN)
+    if ip link show vmbr1 >/dev/null 2>&1; then
+        log "INFO" "Configuring NAT rules for pfSense LAN..."
+        
+        # Add MASQUERADE rule for LAN traffic
+        if ! iptables -t nat -C POSTROUTING -s 192.168.1.0/24 -o vmbr0 -j MASQUERADE 2>/dev/null; then
+            if iptables -t nat -A POSTROUTING -s 192.168.1.0/24 -o vmbr0 -j MASQUERADE 2>/dev/null; then
+                log "INFO" "✓ Added NAT MASQUERADE rule for LAN"
+            else
+                log "WARN" "Failed to add NAT MASQUERADE rule"
+            fi
+        else
+            log "DEBUG" "NAT MASQUERADE rule already exists"
+        fi
+        
+        # Add CT rule for firewall bridges
+        if ! iptables -t raw -C PREROUTING -i fwbr+ -j CT --zone 1 2>/dev/null; then
+            if iptables -t raw -I PREROUTING -i fwbr+ -j CT --zone 1 2>/dev/null; then
+                log "INFO" "✓ Added CT rule for firewall bridges"
+            else
+                log "WARN" "Failed to add CT rule for firewall bridges"
+            fi
+        else
+            log "DEBUG" "CT rule for firewall bridges already exists"
+        fi
+    fi
+    
+    log "INFO" "Network configuration verification completed"
+    log "INFO" ""
+    log "INFO" "🌐 pfSense Admin Panel Access:"
+    log "INFO" "   URL: https://192.168.1.1 (or http://192.168.1.1)"
+    log "INFO" "   Default credentials: admin / pfsense"
+    log "INFO" "   Note: You need to connect a device to the LAN network (vmbr1) to access this"
 }
 
 # Parse command line arguments
@@ -1303,6 +1395,14 @@ parse_arguments() {
                 RESET_TO_ARIADATA=true
                 log "INFO" "Reset mode enabled - will restore to ariadata pve-install.sh compatible configuration"
                 shift
+                ;;
+            --fix)
+                log "INFO" "Fix mode enabled - will ensure network configuration is properly applied"
+                ensure_network_configuration
+                show_network_status
+                log "INFO" "Network configuration fix completed!"
+                log "INFO" "pfSense admin panel should be accessible at: http://192.168.1.1"
+                exit 0
                 ;;
             --generate-config)
                 generate_config_template
@@ -1457,12 +1557,19 @@ main() {
         
         apply_network_config
         configure_proxmox_network
+        
+        # Ensure all network configuration is properly applied
+        ensure_network_configuration
+        
         show_network_status
         
         log "INFO" "Network configuration RESET completed successfully!"
         log "INFO" "Your network is now configured with ariadata pve-install.sh compatible settings"
         log "INFO" "Backup available at: $INTERFACES_BACKUP"
         log "INFO" "Emergency restore script: /root/restore-network.sh"
+        log "INFO" ""
+        log "INFO" "pfSense admin panel should be accessible at: http://192.168.1.1"
+        log "INFO" "(Default credentials: admin / pfsense)"
     else
         log "INFO" "Starting Hetzner Proxmox network configuration..."
         
@@ -1497,11 +1604,18 @@ main() {
         
         apply_network_config
         configure_proxmox_network
+        
+        # Ensure all network configuration is properly applied
+        ensure_network_configuration
+        
         show_network_status
         
         log "INFO" "Network configuration completed successfully!"
         log "INFO" "Backup available at: $INTERFACES_BACKUP"
         log "INFO" "Emergency restore script: /root/restore-network.sh"
+        log "INFO" ""
+        log "INFO" "pfSense admin panel should be accessible at: http://192.168.1.1"
+        log "INFO" "(Default credentials: admin / pfsense)"
     fi
 }
 

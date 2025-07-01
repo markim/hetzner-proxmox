@@ -23,11 +23,9 @@ Automated setup scripts for configuring a Hetzner server with Proxmox, pfSense f
    # ALWAYS start with MAC address verification
    sudo ./install.sh --check-mac
    
-   # Optional: Scan drives and configure RAID arrays (interactive)
+   # Optional: Scan and format drives and configure RAID arrays (interactive)
+   sudo ./install.sh --format-disks
    sudo ./install.sh --setup-mirrors
-   
-   # Install reverse proxy with HTTPS
-   sudo ./install.sh --caddy
    
    # Configure network bridges for server and pfsense
    sudo ./install.sh --network
@@ -37,6 +35,9 @@ Automated setup scripts for configuring a Hetzner server with Proxmox, pfSense f
    
    # Create admin container for pfSense management
    sudo ./install.sh --firewalladmin
+   
+   # Install reverse proxy with HTTPS
+   sudo ./install.sh --caddy
    ```
 
 ## 📖 Documentation
