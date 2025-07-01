@@ -445,7 +445,6 @@ create_zfs_mirror() {
     log "INFO" "Creating ZFS mirror pool: $pool_name"
     
     # Create ZFS mirror with Proxmox-optimized settings
-    # Temporarily disable error handling for zpool create
     set +e
     zpool create -f \
         -o ashift=12 \
@@ -455,8 +454,6 @@ create_zfs_mirror() {
         -O xattr=sa \
         -O dnodesize=auto \
         -O normalization=formD \
-        -O mountpoint=none \
-        -O canmount=off \
         "$pool_name" mirror "$drive1" "$drive2"
     local create_result=$?
     set -e
@@ -464,16 +461,6 @@ create_zfs_mirror() {
     if [[ $create_result -ne 0 ]]; then
         log "ERROR" "Failed to create ZFS mirror $pool_name"
         return 1
-    fi
-    
-    # Create VM storage dataset
-    set +e
-    zfs create -o mountpoint="/mnt/pve/$pool_name" -o canmount=on "$pool_name/vmdata"
-    local dataset_result=$?
-    set -e
-    
-    if [[ $dataset_result -ne 0 ]]; then
-        log "WARN" "Failed to create VM dataset, but pool creation succeeded"
     fi
     
     log "INFO" "Successfully created ZFS mirror: $pool_name"
@@ -536,8 +523,6 @@ create_zfs_single() {
         -O xattr=sa \
         -O dnodesize=auto \
         -O normalization=formD \
-        -O mountpoint=none \
-        -O canmount=off \
         "$pool_name" "$drive"
     local create_result=$?
     set -e
@@ -547,16 +532,6 @@ create_zfs_single() {
         return 1
     fi
     
-    # Create VM storage dataset
-    set +e
-    zfs create -o mountpoint="/mnt/pve/$pool_name" -o canmount=on "$pool_name/vmdata"
-    local dataset_result=$?
-    set -e
-    
-    if [[ $dataset_result -ne 0 ]]; then
-        log "WARN" "Failed to create VM dataset, but pool creation succeeded"
-    fi
-    
     log "INFO" "Successfully created ZFS pool: $pool_name"
     return 0
 }
@@ -564,11 +539,10 @@ create_zfs_single() {
 # Add ZFS pool to Proxmox storage
 add_to_proxmox_storage() {
     local pool_name="$1" storage_name="$2"
-    local mount_point="/mnt/pve/$pool_name"
     
-    log "INFO" "Adding $pool_name to Proxmox as '$storage_name'"
+    log "INFO" "Adding $pool_name to Proxmox as ZFS storage '$storage_name'"
     
-    # Verify pool health and mount with more resilient checking
+    # Verify pool health
     set +e
     zpool status "$pool_name" >/dev/null 2>&1
     local pool_status=$?
@@ -579,14 +553,6 @@ add_to_proxmox_storage() {
         return 1
     fi
     
-    if [[ ! -d "$mount_point" ]]; then
-        log "WARN" "Mount point $mount_point missing, attempting to create..."
-        mkdir -p "$mount_point" || {
-            log "ERROR" "Could not create mount point $mount_point"
-            return 1
-        }
-    fi
-    
     # Add to Proxmox if not already present
     set +e
     pvesm status -storage "$storage_name" &>/dev/null
@@ -594,21 +560,21 @@ add_to_proxmox_storage() {
     set -e
     
     if [[ $storage_exists -ne 0 ]]; then
-        log "INFO" "Adding new storage '$storage_name' to Proxmox..."
+        log "INFO" "Adding new ZFS storage '$storage_name' to Proxmox..."
         
         set +e
-        pvesm add dir "$storage_name" --path "$mount_point" \
-            --content "images,vztmpl,iso,snippets,backup"
+        pvesm add zfspool "$storage_name" --pool "$pool_name" \
+            --content "images,vztmpl,rootdir"
         local add_result=$?
         set -e
         
         if [[ $add_result -ne 0 ]]; then
-            log "ERROR" "Failed to add storage '$storage_name' to Proxmox"
+            log "ERROR" "Failed to add ZFS storage '$storage_name' to Proxmox"
             log "WARN" "You may need to add it manually via the Proxmox web interface"
             return 1
         fi
         
-        log "INFO" "Successfully added storage '$storage_name' to Proxmox"
+        log "INFO" "Successfully added ZFS storage '$storage_name' to Proxmox"
     else
         log "INFO" "Storage '$storage_name' already exists in Proxmox"
     fi
@@ -660,7 +626,7 @@ show_final_status() {
     
     # Proxmox storage
     log "INFO" "Proxmox Storage:"
-    pvesm status 2>/dev/null | grep -E "(zfs-|Type)" || log "INFO" "No ZFS storage in Proxmox"
+    pvesm status 2>/dev/null | grep -E "(zfspool|Type)" || log "INFO" "No ZFS storage in Proxmox"
     echo
     
     log "INFO" "✅ ZFS storage setup completed!"
@@ -692,7 +658,17 @@ Usage: $0 [OPTIONS]
 
 Set up ZFS mirrors for Proxmox storage.
 
-This script is now interactive and will ask you which drives to use.
+This script will:
+  • Detect available drives
+  • Create ZFS mirrors from drives of the same size
+  • Add ZFS pools to Proxmox as native ZFS storage
+  • Require confirmation before making changes
+
+SAFETY FEATURES:
+  • Automatically detects and skips system drives
+  • Shows drive information before configuration
+  • Requires explicit confirmation before creating pools
+  • Uses ZFS native storage in Proxmox (not directory mounts)
 
 OPTIONS:
     --yes, -y, --force  Run in non-interactive mode (auto-confirm prompts)
@@ -762,13 +738,20 @@ EOF
     log "INFO" "Total: $storage_count storage pools will be created"
     
     echo
+    log "INFO" "⚠️  WARNING: This will create ZFS pools on the selected drives ⚠️"
+    log "INFO" "This operation will:"
+    log "INFO" "  • Create ZFS pools on unused drives"
+    log "INFO" "  • Wipe any existing filesystems on selected drives"
+    log "INFO" "  • Add storage pools to Proxmox configuration"
+    log "INFO" "  • This action cannot be easily undone"
+    echo
     
     # Simple confirmation logic
     if [[ "$FORCE_YES" == "true" ]]; then
         log "INFO" "Auto-confirming ZFS configuration (non-interactive mode)"
         confirm="y"
     else
-        read -p "Proceed with ZFS configuration? (y/N): " -r confirm
+        read -p "Are you sure you want to proceed with ZFS pool creation? (y/N): " -r confirm
     fi
     
     if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
