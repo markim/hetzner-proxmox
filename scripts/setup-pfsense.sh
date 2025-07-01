@@ -430,9 +430,6 @@ ip addr del 192.168.1.10/24 dev vmbr1
 - **Console**: \`qm terminal $PFSENSE_VM_ID\`
 EOF
 
-    # Generate pfSense configuration template for advanced users
-    generate_pfsense_config_template "$config_dir"
-    
     log "INFO" "Documentation created:"
     log "INFO" "  - Setup guide: $config_dir/setup-instructions.md"
     log "INFO" "  - Config template: $config_dir/config-template.xml"
