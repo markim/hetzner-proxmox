@@ -29,8 +29,7 @@ COMMANDS:
     (no command)        Show this help and available commands
     --setup-system      Optimize host system for Proxmox and ensure /var/lib/vz partition exists
     --format-drives     Format non-system drives interactively (safe, asks for confirmation)
-    --setup-mirrors     Scan drives and configure optimal RAID mirror arrays
-                        Use --force-zfs-drives to include drives already in ZFS pools
+    --setup-mirrors     Scan drives and configure optimal RAID mirror arrays (interactive)
     --remove-mirrors    Remove ALL RAID mirror configurations including system mirrors (preserves data on drives)
     --caddy             Install and configure Caddy with HTTPS (current functionality)
     --network           Configure network interfaces for additional Hetzner IPs
@@ -49,7 +48,6 @@ EXAMPLES:
     $0 --setup-system           # Optimize host system for Proxmox and setup /var/lib/vz partition
     $0 --format-drives          # Format non-system drives interactively
     $0 --setup-mirrors          # Scan drives and configure optimal RAID mirror arrays
-    $0 --setup-mirrors --force-zfs-drives  # Include drives already in ZFS pools
     $0 --remove-mirrors         # Remove ALL RAID mirror configurations including system mirrors
     $0 --caddy                  # Install Caddy with current configuration
     $0 --network                # Configure network interfaces for additional IPs
@@ -154,13 +152,8 @@ parse_args() {
                 shift
                 ;;
             --force-zfs-drives)
-                # Special argument for setup-mirrors command
-                if [[ "$command" == "setup-mirrors" ]]; then
-                    command_args+=("$1")
-                else
-                    log "ERROR" "--force-zfs-drives is only valid with --setup-mirrors"
-                    exit 1
-                fi
+                # Legacy option - now handled interactively in setup-mirrors
+                log "INFO" "Note: Drive selection is now handled interactively"
                 shift
                 ;;
             --caddy|--setup-system|--network|--pfsense|--firewalladmin|--check-mac|--setup-mirrors|--remove-mirrors|--format-drives)
@@ -473,13 +466,17 @@ run_setup_mirrors() {
     local command_args=()
     if [[ -f "/tmp/install_command_args_$$" ]]; then
         while IFS= read -r arg; do
-            command_args+=("$arg")
+            [[ -n "$arg" ]] && command_args+=("$arg")  # Only add non-empty args
         done < "/tmp/install_command_args_$$"
         rm -f "/tmp/install_command_args_$$"
     fi
     
     # Run drives setup script with any additional arguments
-    run_script "scripts/setup-mirrors.sh" "${command_args[@]}"
+    if [[ ${#command_args[@]} -gt 0 ]]; then
+        run_script "scripts/setup-mirrors.sh" "${command_args[@]}"
+    else
+        run_script "scripts/setup-mirrors.sh"
+    fi
     
     log "INFO" "✅ Drive Mirror Configuration Complete!"
     log "INFO" "Drive mirrors have been configured successfully"

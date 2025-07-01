@@ -44,41 +44,117 @@ detect_drives() {
     
     log "INFO" "Analyzing drives for mirroring eligibility:"
     
+    # First pass - categorize all drives
+    local available_drives=()
+    local available_sizes=()
+    local zfs_drives=()
+    local zfs_sizes=()
+    local system_drives=()
+    local mounted_drives=()
+    
     while read -r drive_name size; do
-        local drive_status="AVAILABLE"
-        
         # Check for system usage
         if lsblk "$drive_name" -no MOUNTPOINT | grep -qE "^(/|/boot|/var|/usr|/home)"; then
-            drive_status="SYSTEM_DRIVE"
-            log "INFO" "  $drive_name ($size) - $drive_status (skipping)"
-            continue
+            log "INFO" "  $drive_name ($size) - SYSTEM_DRIVE (skipping)"
+            system_drives+=("$drive_name ($size)")
         # Check for existing ZFS pool membership
         elif is_drive_in_zfs_pool "$drive_name"; then
-            drive_status="IN_ZFS_POOL"
-            if [[ "${FORCE_ZFS_DRIVES:-false}" == "true" ]]; then
-                log "INFO" "  $drive_name ($size) - $drive_status (forcing inclusion)"
-            else
-                log "INFO" "  $drive_name ($size) - $drive_status (skipping)"
-                continue
-            fi
+            log "INFO" "  $drive_name ($size) - IN_ZFS_POOL"
+            zfs_drives+=("$drive_name")
+            zfs_sizes+=("$size")
         # Check for mounted partitions
         elif lsblk "$drive_name" -no MOUNTPOINT | grep -q "^/"; then
-            drive_status="HAS_MOUNTED_PARTITIONS"
-            log "INFO" "  $drive_name ($size) - $drive_status (skipping)"
-            continue
+            log "INFO" "  $drive_name ($size) - HAS_MOUNTED_PARTITIONS (skipping)"
+            mounted_drives+=("$drive_name ($size)")
+        else
+            log "INFO" "  $drive_name ($size) - AVAILABLE"
+            available_drives+=("$drive_name")
+            available_sizes+=("$size")
         fi
-        
-        log "INFO" "  $drive_name ($size) - $drive_status"
-        AVAILABLE_DRIVES+=("$drive_name")
-        DRIVE_SIZES+=("$size")
     done <<< "$drives"
     
+    # Show summary and ask user what to do
+    echo
+    log "INFO" "=== DRIVE SUMMARY ==="
+    log "INFO" "Available drives (not in use): ${#available_drives[@]}"
+    for i in "${!available_drives[@]}"; do
+        log "INFO" "  ${available_drives[i]} (${available_sizes[i]})"
+    done
+    
+    if [[ ${#zfs_drives[@]} -gt 0 ]]; then
+        log "INFO" "Drives already in ZFS pools: ${#zfs_drives[@]}"
+        for i in "${!zfs_drives[@]}"; do
+            log "INFO" "  ${zfs_drives[i]} (${zfs_sizes[i]})"
+        done
+    fi
+    
+    if [[ ${#system_drives[@]} -gt 0 ]]; then
+        log "INFO" "System drives (will be skipped): ${#system_drives[@]}"
+        for drive in "${system_drives[@]}"; do
+            log "INFO" "  $drive"
+        done
+    fi
+    
+    if [[ ${#mounted_drives[@]} -gt 0 ]]; then
+        log "INFO" "Drives with mounted partitions (will be skipped): ${#mounted_drives[@]}"
+        for drive in "${mounted_drives[@]}"; do
+            log "INFO" "  $drive"
+        done
+    fi
+    
+    echo
+    
+    # Decide what to work with
+    if [[ ${#available_drives[@]} -eq 0 && ${#zfs_drives[@]} -eq 0 ]]; then
+        log "ERROR" "No drives available for ZFS mirror creation"
+        log "INFO" "All drives are either system drives or have mounted partitions"
+        exit 1
+    elif [[ ${#available_drives[@]} -eq 0 ]]; then
+        log "INFO" "No unused drives found. Only drives already in ZFS pools are available."
+        echo
+        read -p "Do you want to work with drives already in ZFS pools? (y/N): " -r confirm
+        if [[ "$confirm" =~ ^[Yy]$ ]]; then
+            AVAILABLE_DRIVES=("${zfs_drives[@]}")
+            DRIVE_SIZES=("${zfs_sizes[@]}")
+            export FORCE_ZFS_DRIVES="true"
+        else
+            log "INFO" "No drives selected for configuration"
+            exit 0
+        fi
+    elif [[ ${#zfs_drives[@]} -gt 0 ]]; then
+        log "INFO" "You can work with:"
+        log "INFO" "  1) Only unused drives (${#available_drives[@]} drives)"
+        log "INFO" "  2) Both unused drives AND drives already in ZFS pools (${#available_drives[@]} + ${#zfs_drives[@]} drives)"
+        echo
+        read -p "Choose option (1-2): " -r choice
+        case $choice in
+            1)
+                AVAILABLE_DRIVES=("${available_drives[@]}")
+                DRIVE_SIZES=("${available_sizes[@]}")
+                ;;
+            2)
+                AVAILABLE_DRIVES=("${available_drives[@]}" "${zfs_drives[@]}")
+                DRIVE_SIZES=("${available_sizes[@]}" "${zfs_sizes[@]}")
+                export FORCE_ZFS_DRIVES="true"
+                ;;
+            *)
+                log "INFO" "Invalid choice. Using only unused drives."
+                AVAILABLE_DRIVES=("${available_drives[@]}")
+                DRIVE_SIZES=("${available_sizes[@]}")
+                ;;
+        esac
+    else
+        # Only available drives, use them
+        AVAILABLE_DRIVES=("${available_drives[@]}")
+        DRIVE_SIZES=("${available_sizes[@]}")
+    fi
+    
     [[ ${#AVAILABLE_DRIVES[@]} -eq 0 ]] && {
-        log "ERROR" "No available drives found for configuration"
+        log "ERROR" "No drives selected for configuration"
         exit 1
     }
     
-    log "INFO" "Found ${#AVAILABLE_DRIVES[@]} drives for configuration"
+    log "INFO" "Selected ${#AVAILABLE_DRIVES[@]} drives for configuration"
 }
 
 # Optimized drive grouping
@@ -394,13 +470,12 @@ show_final_status() {
 
 # Main execution
 main() {
-    # Parse arguments
-    local force_zfs_drives=false
+    # Parse arguments (keeping for backwards compatibility, but making interactive)
     while [[ $# -gt 0 ]]; do
         case $1 in
             --force-zfs-drives)
-                force_zfs_drives=true
-                log "INFO" "Forcing operation on drives already in ZFS pools"
+                # Legacy option - now handled interactively
+                log "INFO" "Note: --force-zfs-drives is now handled interactively"
                 shift
                 ;;
             --help|-h)
@@ -409,8 +484,9 @@ Usage: $0 [OPTIONS]
 
 Set up ZFS mirrors for Proxmox storage.
 
+This script is now interactive and will ask you which drives to use.
+
 OPTIONS:
-    --force-zfs-drives    Include drives that are already in ZFS pools
     --help               Show this help message
 
 EOF
@@ -428,24 +504,8 @@ EOF
     # Root check
     [[ $EUID -eq 0 ]] || { log "ERROR" "Must run as root"; exit 1; }
     
-    # Export force option for detect_drives to use
-    export FORCE_ZFS_DRIVES="$force_zfs_drives"
-    
     # Execution flow
     detect_drives
-    
-    # Check if we have any available drives
-    if [[ ${#AVAILABLE_DRIVES[@]} -eq 0 ]]; then
-        log "ERROR" "No available drives found for ZFS mirror creation"
-        log "INFO" "All detected drives are either:"
-        log "INFO" "  - System drives (mounted at /, /boot, etc.)"
-        log "INFO" "  - Already in ZFS pools"
-        log "INFO" "  - Have mounted partitions"
-        log "INFO" ""
-        log "INFO" "If you want to work with drives already in ZFS pools, use:"
-        log "INFO" "  $0 --force-zfs-drives"
-        exit 1
-    fi
     
     group_drives_by_size
     check_current_storage
