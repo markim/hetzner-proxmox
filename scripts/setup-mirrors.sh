@@ -5,6 +5,18 @@
 
 set -euo pipefail
 
+# Custom error handler
+error_handler() {
+    local line_no=$1
+    local error_code=$2
+    log "ERROR" "Script failed at line $line_no with exit code $error_code"
+    log "ERROR" "This error occurred in the setup-mirrors script"
+    exit "$error_code"
+}
+
+# Set up error handling
+trap 'error_handler ${LINENO} $?' ERR
+
 # Get script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
@@ -192,16 +204,26 @@ create_raid_mirrors() {
         # Remove existing data storage configuration before creating mirrors
         remove_data_storage_from_proxmox
     fi
-    
+
     local mirror_index=0
+    local success_count=0
+    local failed_mirrors=()
+    
+    # Temporarily disable exit on error to handle mirror creation failures gracefully
+    set +e
+    
     for mirror_group in "${MIRROR_GROUPS[@]}"; do
         IFS=' ' read -ra drives_in_mirror <<< "$mirror_group"
+        
+        log "DEBUG" "Processing mirror group: ${drives_in_mirror[*]}"
         
         if [[ ${#drives_in_mirror[@]} -eq 2 ]]; then
             # Create RAID1 mirror
             local md_device="/dev/md$mirror_index"
             local drive1="${drives_in_mirror[0]}"
             local drive2="${drives_in_mirror[1]}"
+            
+            log "INFO" "📀 Creating RAID1 mirror $md_device with drives: $drive1, $drive2"
             
             # Check if these drives are already part of an existing RAID array
             local drive1_in_raid=false
@@ -230,13 +252,16 @@ create_raid_mirrors() {
                     # Check if it already has a filesystem
                     if ! lsblk "/dev/$existing_array" -no FSTYPE | grep -q "ext4"; then
                         log "INFO" "Creating ext4 filesystem on existing array /dev/$existing_array..."
-                        if ! mkfs.ext4 -F "/dev/$existing_array"; then
-                            log "ERROR" "Failed to create filesystem on /dev/$existing_array"
-                            mirror_index=$((mirror_index + 1))
-                            continue
+                        if mkfs.ext4 -F "/dev/$existing_array"; then
+                            log "INFO" "✅ Successfully created filesystem on existing array"
+                            success_count=$((success_count + 1))
+                        else
+                            log "ERROR" "❌ Failed to create filesystem on /dev/$existing_array"
+                            failed_mirrors+=("$mirror_group")
                         fi
                     else
                         log "INFO" "Existing array /dev/$existing_array already has filesystem"
+                        success_count=$((success_count + 1))
                     fi
                     
                     # Add to Proxmox storage
@@ -244,7 +269,8 @@ create_raid_mirrors() {
                         log "ERROR" "Failed to add existing RAID array to Proxmox storage"
                     fi
                 else
-                    log "ERROR" "Expected RAID device /dev/$existing_array not found"
+                    log "ERROR" "❌ Expected RAID device /dev/$existing_array not found"
+                    failed_mirrors+=("$mirror_group")
                 fi
                 
                 mirror_index=$((mirror_index + 1))
@@ -255,6 +281,7 @@ create_raid_mirrors() {
             if $drive1_in_raid || $drive2_in_raid; then
                 log "WARN" "One or both drives ($drive1, $drive2) are already part of a RAID array"
                 log "WARN" "Cannot create new RAID with drives that are already in use"
+                failed_mirrors+=("$mirror_group")
                 mirror_index=$((mirror_index + 1))
                 continue
             fi
@@ -277,14 +304,20 @@ create_raid_mirrors() {
                 read -p "Are you sure you want to proceed with system drive mirroring? (y/N): " -r sys_confirm
                 if [[ ! "$sys_confirm" =~ ^[Yy]$ ]]; then
                     log "INFO" "Skipping system drive mirror configuration"
+                    failed_mirrors+=("$mirror_group")
+                    mirror_index=$((mirror_index + 1))
                     continue
                 fi
                 
                 log "INFO" "Setting up system drive mirror - this requires careful handling..."
-                setup_system_drive_mirror "$drive1" "$drive2" "$md_device" "$mirror_index"
-            else
-                log "INFO" "Creating RAID1 mirror $md_device with drives: $drive1, $drive2"
-                
+                if setup_system_drive_mirror "$drive1" "$drive2" "$md_device" "$mirror_index"; then
+                    log "INFO" "✅ Successfully set up system drive mirror"
+                    success_count=$((success_count + 1))
+                else
+                    log "ERROR" "❌ Failed to set up system drive mirror"
+                    failed_mirrors+=("$mirror_group")
+                fi
+            else                
                 # Check if drives are clean
                 for drive in "$drive1" "$drive2"; do
                     if lsblk "$drive" -no FSTYPE 2>/dev/null | grep -q "."; then
@@ -308,28 +341,36 @@ create_raid_mirrors() {
                     
                     # Check if the array is actually available
                     if [[ ! -b "$md_device" ]]; then
-                        log "ERROR" "RAID device $md_device is not available"
+                        log "ERROR" "❌ RAID device $md_device is not available"
+                        failed_mirrors+=("$mirror_group")
+                        mirror_index=$((mirror_index + 1))
                         continue
                     fi
                     
                     # Create filesystem
                     log "INFO" "Creating ext4 filesystem on $md_device..."
-                    if ! mkfs.ext4 -F "$md_device"; then
-                        log "ERROR" "Failed to create filesystem on $md_device"
-                        continue
-                    fi
-                    
-                    # Wait for filesystem to be fully created and UUID to be available
-                    sleep 3
-                    sync
-                    
-                    # Add to Proxmox storage
-                    if ! add_to_proxmox_storage "$md_device" "raid-mirror-$mirror_index"; then
-                        log "ERROR" "Failed to add RAID array to Proxmox storage"
-                        # Continue with next mirror instead of failing completely
+                    if mkfs.ext4 -F "$md_device"; then
+                        log "INFO" "✅ Successfully created filesystem on $md_device"
+                        
+                        # Wait for filesystem to be fully created and UUID to be available
+                        sleep 3
+                        sync
+                        
+                        # Add to Proxmox storage
+                        if add_to_proxmox_storage "$md_device" "raid-mirror-$mirror_index"; then
+                            log "INFO" "✅ Successfully added RAID array to Proxmox storage"
+                            success_count=$((success_count + 1))
+                        else
+                            log "ERROR" "Failed to add RAID array to Proxmox storage"
+                            # Continue with next mirror instead of failing completely
+                        fi
+                    else
+                        log "ERROR" "❌ Failed to create filesystem on $md_device"
+                        failed_mirrors+=("$mirror_group")
                     fi
                 else
-                    log "ERROR" "Failed to create RAID array $md_device"
+                    log "ERROR" "❌ Failed to create RAID array $md_device"
+                    failed_mirrors+=("$mirror_group")
                 fi
             fi
             
@@ -338,6 +379,8 @@ create_raid_mirrors() {
         elif [[ ${#drives_in_mirror[@]} -eq 1 ]]; then
             # Single drive setup
             local drive="${drives_in_mirror[0]}"
+            
+            log "INFO" "📀 Configuring single drive: $drive"
             
             # Check if this drive is already part of a RAID array
             if is_drive_in_raid "$drive"; then
@@ -351,13 +394,16 @@ create_raid_mirrors() {
                     # Check if it already has a filesystem
                     if ! lsblk "/dev/$raid_device" -no FSTYPE | grep -q "ext4"; then
                         log "INFO" "Creating ext4 filesystem on existing array /dev/$raid_device..."
-                        if ! mkfs.ext4 -F "/dev/$raid_device"; then
-                            log "ERROR" "Failed to create filesystem on /dev/$raid_device"
-                            mirror_index=$((mirror_index + 1))
-                            continue
+                        if mkfs.ext4 -F "/dev/$raid_device"; then
+                            log "INFO" "✅ Successfully created filesystem on existing array"
+                            success_count=$((success_count + 1))
+                        else
+                            log "ERROR" "❌ Failed to create filesystem on /dev/$raid_device"
+                            failed_mirrors+=("$mirror_group")
                         fi
                     else
                         log "INFO" "Existing array /dev/$raid_device already has filesystem"
+                        success_count=$((success_count + 1))
                     fi
                     
                     # Add to Proxmox storage
@@ -365,7 +411,8 @@ create_raid_mirrors() {
                         log "ERROR" "Failed to add existing RAID array to Proxmox storage"
                     fi
                 else
-                    log "ERROR" "Expected RAID device /dev/$raid_device not found"
+                    log "ERROR" "❌ Expected RAID device /dev/$raid_device not found"
+                    failed_mirrors+=("$mirror_group")
                 fi
                 
                 mirror_index=$((mirror_index + 1))
@@ -375,10 +422,10 @@ create_raid_mirrors() {
             # Check if this is a system drive
             if lsblk "$drive" -no MOUNTPOINT | grep -qE "^(/|/boot|/var|/usr|/home)$" 2>/dev/null; then
                 log "INFO" "Skipping single system drive: $drive (already in use by system)"
+                failed_mirrors+=("$mirror_group")
+                mirror_index=$((mirror_index + 1))
                 continue
             fi
-            
-            log "INFO" "Configuring single drive: $drive"
             
             # Wipe drive if needed
             if lsblk "$drive" -no FSTYPE 2>/dev/null | grep -q "."; then
@@ -388,20 +435,48 @@ create_raid_mirrors() {
             
             # Create filesystem directly on drive
             log "INFO" "Creating ext4 filesystem on $drive..."
-            if ! mkfs.ext4 -F "$drive"; then
-                log "ERROR" "Failed to create filesystem on $drive"
-                continue
-            fi
-            
-            # Add to Proxmox storage
-            if ! add_to_proxmox_storage "$drive" "single-drive-$mirror_index"; then
-                log "ERROR" "Failed to add single drive to Proxmox storage"
-                # Continue with next drive instead of failing completely
+            if mkfs.ext4 -F "$drive"; then
+                log "INFO" "✅ Successfully created filesystem on $drive"
+                
+                # Add to Proxmox storage
+                if add_to_proxmox_storage "$drive" "single-drive-$mirror_index"; then
+                    log "INFO" "✅ Successfully added single drive to Proxmox storage"
+                    success_count=$((success_count + 1))
+                else
+                    log "ERROR" "Failed to add single drive to Proxmox storage"
+                    # Continue with next drive instead of failing completely
+                fi
+            else
+                log "ERROR" "❌ Failed to create filesystem on $drive"
+                failed_mirrors+=("$mirror_group")
             fi
             
             mirror_index=$((mirror_index + 1))
         fi
+        
+        log "DEBUG" "Completed processing mirror group $mirror_index"
     done
+    
+    # Re-enable exit on error
+    set -e
+    
+    # Report results
+    echo
+    log "INFO" "Mirror creation completed!"
+    log "INFO" "Successfully processed: $success_count mirror group(s)"
+    
+    if [[ ${#failed_mirrors[@]} -gt 0 ]]; then
+        log "WARNING" "Failed to process the following mirror groups:"
+        for failed_group in "${failed_mirrors[@]}"; do
+            log "WARNING" "  - $failed_group"
+        done
+        echo
+        log "INFO" "Common reasons for mirror creation failures:"
+        log "INFO" "  - Drives are already part of other RAID arrays"
+        log "INFO" "  - System drives cannot be safely mirrored"
+        log "INFO" "  - Hardware or driver issues"
+        log "INFO" "  - Insufficient permissions"
+    fi
     
 }
 
@@ -427,7 +502,7 @@ add_to_proxmox_storage() {
         log "INFO" "Waiting for filesystem UUID to be available (attempt $((retry_count + 1))/5)..."
         sleep 2
         sync
-        ((retry_count++))
+        retry_count=$((retry_count + 1))
     done
     
     if [[ -z "$uuid" ]]; then
@@ -645,7 +720,7 @@ display_final_status() {
             local storage_path="${BASH_REMATCH[2]}"
             if [[ "$storage_path" =~ ^/mnt/pve/ ]]; then
                 log "INFO" "  - $storage_name: $storage_path"
-                ((storage_count++))
+                storage_count=$((storage_count + 1))
             fi
         fi
     done < <(pvesm status)
@@ -826,7 +901,7 @@ setup_lvm_system_mirror() {
         
         log "INFO" "Successfully created RAID1 mirror for $partition_type partition"
         
-        ((partition_index++))
+        partition_index=$((partition_index + 1))
     done
     
     # Step 3.5: Handle any additional data partitions for Proxmox storage
@@ -909,7 +984,7 @@ setup_lvm_system_mirror() {
                 fi
                 
                 log "INFO" "Successfully created RAID1 mirror for data partition"
-                ((partition_index++))
+                partition_index=$((partition_index + 1))
             else
                 log "ERROR" "Failed to create RAID array $data_md_device for data partition"
             fi
@@ -1149,7 +1224,7 @@ main() {
             else
                 log "INFO" "  RAID1 Mirror $mirror_index: ${drives_in_mirror[0]} + ${drives_in_mirror[1]}"
                 log "INFO" "    └─ Will be added to Proxmox as 'raid-mirror-$mirror_index'"
-                ((storage_to_add++))
+                storage_to_add=$((storage_to_add + 1))
             fi
         else
             # Check if this is a system drive
@@ -1160,11 +1235,11 @@ main() {
                 existing_raid=$(get_raid_device_for_drive "${drives_in_mirror[0]}")
                 log "INFO" "  Existing RAID Drive $mirror_index: ${drives_in_mirror[0]} (part of /dev/$existing_raid)"
                 log "INFO" "    └─ Will be added to Proxmox as 'existing-raid-$mirror_index'"
-                ((storage_to_add++))
+                storage_to_add=$((storage_to_add + 1))
             else
                 log "INFO" "  Single Drive $mirror_index: ${drives_in_mirror[0]}"
                 log "INFO" "    └─ Will be added to Proxmox as 'single-drive-$mirror_index'"
-                ((storage_to_add++))
+                storage_to_add=$((storage_to_add + 1))
             fi
         fi
         mirror_index=$((mirror_index + 1))
@@ -1189,6 +1264,16 @@ main() {
     
     # Display final status
     display_final_status
+    
+    log "INFO" "✅ Drive mirroring setup completed successfully!"
+    log "INFO" ""
+    log "INFO" "Next steps:"
+    log "INFO" "1. Check Proxmox storage configuration in the web interface"
+    log "INFO" "2. Configure network: ./install.sh --network"
+    log "INFO" "3. Install Caddy: ./install.sh --caddy"
+    
+    # Explicitly exit with success code
+    exit 0
 }
 
 # Execute main function if script is run directly
