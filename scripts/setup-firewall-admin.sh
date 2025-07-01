@@ -49,13 +49,13 @@ validate_prerequisites() {
     # Check if network bridges exist
     if ! ip link show vmbr0 >/dev/null 2>&1; then
         log "ERROR" "WAN bridge vmbr0 not found. Run network configuration first."
-        log "ERROR" "Execute: ./scripts/configure-network.sh"
+        log "ERROR" "Execute: ./scripts/setup-network.sh"
         return 1
     fi
     
     if ! ip link show vmbr1 >/dev/null 2>&1; then
         log "ERROR" "LAN bridge vmbr1 not found. Run network configuration first."
-        log "ERROR" "Execute: ./scripts/configure-network.sh"
+        log "ERROR" "Execute: ./scripts/setup-network.sh"
         return 1
     fi
     
@@ -98,7 +98,7 @@ create_firewall_admin_vm() {
     log "INFO" "Creating firewall admin VM with ID: $FIREWALL_ADMIN_VM_ID"
     
     # Load additional IPs and MACs arrays from network configuration
-    source "$SCRIPT_DIR/scripts/configure-network.sh" || {
+    source "$SCRIPT_DIR/scripts/setup-network.sh" || {
         log "ERROR" "Failed to load network configuration"
         return 1
     }

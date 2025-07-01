@@ -18,8 +18,8 @@ check_mac_configuration() {
     log "INFO" "Checking MAC address configuration for additional IPs..."
     
     # Parse additional IPs
-    if [[ -f "$SCRIPT_DIR/scripts/configure-network.sh" ]]; then
-        source "$SCRIPT_DIR/scripts/configure-network.sh" >/dev/null 2>&1 || true
+    if [[ -f "$SCRIPT_DIR/scripts/setup-network.sh" ]]; then
+        source "$SCRIPT_DIR/scripts/setup-network.sh" >/dev/null 2>&1 || true
         if command -v parse_additional_ips >/dev/null 2>&1; then
             parse_additional_ips 2>/dev/null || true
         fi

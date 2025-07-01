@@ -10,7 +10,7 @@ error_handler() {
     local line_no=$1
     local error_code=$2
     log "ERROR" "Script failed at line $line_no with exit code $error_code"
-    log "ERROR" "This error occurred in the configure-network script"
+    log "ERROR" "This error occurred in the setup-network script"
     exit "$error_code"
 }
 

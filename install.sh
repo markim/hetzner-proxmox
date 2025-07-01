@@ -311,7 +311,7 @@ validate_setup() {
             ;;
         "network")
             # Network-specific validation is handled in the network script
-            log "INFO" "Network validation will be performed by configure-network.sh"
+            log "INFO" "Network validation will be performed by setup-network.sh"
             # Basic connectivity tools check
             if ! command -v ping &> /dev/null; then
                 log "ERROR" "ping command not found. Please run system setup first: $0 --setup-system"
@@ -457,9 +457,9 @@ run_network_setup() {
     
     # Run network configuration script with arguments
     if [[ ${#network_args[@]} -gt 0 ]]; then
-        run_script "scripts/configure-network.sh" "${network_args[@]}"
+        run_script "scripts/setup-network.sh" "${network_args[@]}"
     else
-        run_script "scripts/configure-network.sh" "--verbose"
+        run_script "scripts/setup-network.sh" "--verbose"
     fi
 
     log "INFO" "✅ Network Configuration Complete!"

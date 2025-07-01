@@ -39,7 +39,7 @@ The setup-system.sh script uses configurable paths that can be overridden by env
 |----------|---------------|-------------|
 | `LOG_DIR` | `/var/log` | Directory for log files |
 
-## Network Configuration (configure-network.sh)
+## Network Configuration (setup-network.sh)
 
 | Variable | Default Value | Description |
 |----------|---------------|-------------|

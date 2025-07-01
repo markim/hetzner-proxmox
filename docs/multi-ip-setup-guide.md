@@ -56,7 +56,7 @@ Run the network configuration script to set up bridges and additional IPs:
 ./install.sh --check-mac
 
 # Apply network configuration (this will backup current config)
-./scripts/configure-network.sh
+./scripts/setup-network.sh
 ```
 
 **Important**: This will modify your network configuration. Make sure you have console access to your server in case SSH connectivity is interrupted.
@@ -266,7 +266,7 @@ pct exec 300 -- ping -c 3 8.8.8.8
 ### Network Issues:
 ```bash
 # Check network configuration
-./scripts/configure-network.sh --status
+./scripts/setup-network.sh --status
 
 # Verify MAC addresses
 ./install.sh --check-mac

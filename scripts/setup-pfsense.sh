@@ -41,13 +41,13 @@ validate_prerequisites() {
     # Check if network bridges exist
     if ! ip link show vmbr0 >/dev/null 2>&1; then
         log "ERROR" "WAN bridge vmbr0 not found. Run network configuration first."
-        log "ERROR" "Execute: ./scripts/configure-network.sh"
+        log "ERROR" "Execute: ./scripts/setup-network.sh"
         return 1
     fi
     
     if ! ip link show vmbr1 >/dev/null 2>&1; then
         log "ERROR" "LAN bridge vmbr1 not found. Run network configuration first."
-        log "ERROR" "Execute: ./scripts/configure-network.sh"
+        log "ERROR" "Execute: ./scripts/setup-network.sh"
         return 1
     fi
     
@@ -63,7 +63,7 @@ validate_prerequisites() {
     if [[ "$vmbr1_ip" != "192.168.1.1" ]]; then
         log "ERROR" "vmbr1 must have IP 192.168.1.1 for pfSense LAN configuration"
         log "ERROR" "Current vmbr1 IP: ${vmbr1_ip:-none}"
-        log "ERROR" "Run network configuration to fix this: ./scripts/configure-network.sh"
+        log "ERROR" "Run network configuration to fix this: ./scripts/setup-network.sh"
         return 1
     fi
     
@@ -343,9 +343,9 @@ main() {
     
     
     # Load additional IPs array if available
-    if [[ -f "$SCRIPT_DIR/scripts/configure-network.sh" ]]; then
+    if [[ -f "$SCRIPT_DIR/scripts/setup-network.sh" ]]; then
         # Source the network configuration to get additional IPs
-        source "$SCRIPT_DIR/scripts/configure-network.sh" >/dev/null 2>&1 || true
+        source "$SCRIPT_DIR/scripts/setup-network.sh" >/dev/null 2>&1 || true
         
         # Try to parse additional IPs if the function exists
         if command -v parse_additional_ips >/dev/null 2>&1; then

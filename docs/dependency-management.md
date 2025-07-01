@@ -58,7 +58,7 @@ The following scripts now rely on `setup-system.sh` for dependencies:
    - Requires: `findmnt`, `zpool`
    - Validation handled by `install.sh`
 
-4. **`configure-network.sh`**
+4. **`setup-network.sh`**
    - Requires: `ping`, `systemctl`
    - Basic tools usually available on Debian systems
 
