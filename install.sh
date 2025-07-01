@@ -440,13 +440,11 @@ run_network_setup() {
     fi
     
     # Add verbose flag to network script
-    network_args+=("--verbose")
-    
     # Run network configuration script with arguments
     if [[ ${#network_args[@]} -gt 0 ]]; then
         run_script "scripts/setup-network.sh" "${network_args[@]}"
     else
-        run_script "scripts/setup-network.sh" "--verbose"
+        run_script "scripts/setup-network.sh"
     fi
 
     log "INFO" "✅ Network Configuration Complete!"
