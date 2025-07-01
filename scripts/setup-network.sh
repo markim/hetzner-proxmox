@@ -1224,6 +1224,15 @@ EOF
             log "INFO" "  vmbr1 not yet active (restart required)"
         fi
         
+        log "INFO" "=== DMZ Bridge (vmbr2) ==="
+        if ip addr show vmbr2 >/dev/null 2>&1; then
+            ip addr show vmbr2 2>/dev/null | grep "inet " | while IFS= read -r line; do
+                log "INFO" "  $line"
+            done
+        else
+            log "INFO" "  vmbr2 not yet active (restart required)"
+        fi
+        
     else
         log "ERROR" "Failed to restart networking service"
         log "ERROR" "You may need to manually restore using: bash $restore_script"
@@ -1316,6 +1325,54 @@ ensure_network_configuration() {
         log "WARN" "vmbr1 bridge not found - pfSense LAN interface will not be available"
     fi
     
+    # Check and fix vmbr2 configuration (DMZ)
+    if ip link show vmbr2 >/dev/null 2>&1; then
+        local vmbr2_ip
+        vmbr2_ip=$(ip addr show vmbr2 | grep "inet " | awk '{print $2}' | cut -d'/' -f1 | head -n1 || true)
+        
+        if [[ "$vmbr2_ip" != "10.0.2.1" ]]; then
+            log "INFO" "Configuring vmbr2 with correct IP address..."
+            if [[ -n "$vmbr2_ip" && "$vmbr2_ip" != "10.0.2.1" ]]; then
+                # Remove incorrect IP
+                ip addr del "${vmbr2_ip}/24" dev vmbr2 2>/dev/null || true
+            fi
+            
+            # Add correct IP
+            if ip addr add 10.0.2.1/24 dev vmbr2 2>/dev/null; then
+                log "INFO" "✓ Added IP 10.0.2.1/24 to vmbr2"
+            else
+                log "DEBUG" "IP 10.0.2.1/24 already exists on vmbr2"
+            fi
+        else
+            log "INFO" "✓ vmbr2 already has correct IP: $vmbr2_ip"
+        fi
+        
+        # Ensure vmbr2 is up
+        if ip link set vmbr2 up 2>/dev/null; then
+            log "INFO" "✓ vmbr2 interface is up"
+        fi
+    else
+        log "WARN" "vmbr2 bridge not found - pfSense DMZ interface will not be available"
+        log "INFO" "Creating vmbr2 bridge manually..."
+        
+        # Create vmbr2 bridge if it doesn't exist
+        if ip link add name vmbr2 type bridge 2>/dev/null; then
+            log "INFO" "✓ Created vmbr2 bridge"
+            
+            # Configure vmbr2 IP
+            if ip addr add 10.0.2.1/24 dev vmbr2 2>/dev/null; then
+                log "INFO" "✓ Added IP 10.0.2.1/24 to vmbr2"
+            fi
+            
+            # Bring up vmbr2
+            if ip link set vmbr2 up 2>/dev/null; then
+                log "INFO" "✓ vmbr2 interface is up"
+            fi
+        else
+            log "WARN" "Failed to create vmbr2 bridge - may already exist or permission issue"
+        fi
+    fi
+    
     # Apply additional IPs to vmbr0 if they're missing
     if ip link show vmbr0 >/dev/null 2>&1 && [[ -n "${ADDITIONAL_IPS_ARRAY[*]:-}" && ${#ADDITIONAL_IPS_ARRAY[@]} -gt 0 ]]; then
         log "INFO" "Verifying additional IP addresses on vmbr0..."
@@ -1361,13 +1418,31 @@ ensure_network_configuration() {
             if iptables -t nat -A POSTROUTING -s 192.168.1.0/24 -o vmbr0 -j MASQUERADE 2>/dev/null; then
                 log "INFO" "✓ Added NAT MASQUERADE rule for LAN"
             else
-                log "WARN" "Failed to add NAT MASQUERADE rule"
+                log "WARN" "Failed to add NAT MASQUERADE rule for LAN"
             fi
         else
-            log "DEBUG" "NAT MASQUERADE rule already exists"
+            log "DEBUG" "NAT MASQUERADE rule for LAN already exists"
         fi
+    fi
+    
+    # Apply NAT rules for vmbr2 (pfSense DMZ)
+    if ip link show vmbr2 >/dev/null 2>&1; then
+        log "INFO" "Configuring NAT rules for pfSense DMZ..."
         
-        # Add CT rule for firewall bridges
+        # Add MASQUERADE rule for DMZ traffic
+        if ! iptables -t nat -C POSTROUTING -s 10.0.2.0/24 -o vmbr0 -j MASQUERADE 2>/dev/null; then
+            if iptables -t nat -A POSTROUTING -s 10.0.2.0/24 -o vmbr0 -j MASQUERADE 2>/dev/null; then
+                log "INFO" "✓ Added NAT MASQUERADE rule for DMZ"
+            else
+                log "WARN" "Failed to add NAT MASQUERADE rule for DMZ"
+            fi
+        else
+            log "DEBUG" "NAT MASQUERADE rule for DMZ already exists"
+        fi
+    fi
+    
+    # Add CT rule for firewall bridges (applies to both LAN and DMZ)
+    if ip link show vmbr1 >/dev/null 2>&1 || ip link show vmbr2 >/dev/null 2>&1; then
         if ! iptables -t raw -C PREROUTING -i fwbr+ -j CT --zone 1 2>/dev/null; then
             if iptables -t raw -I PREROUTING -i fwbr+ -j CT --zone 1 2>/dev/null; then
                 log "INFO" "✓ Added CT rule for firewall bridges"
@@ -1381,10 +1456,59 @@ ensure_network_configuration() {
     
     log "INFO" "Network configuration verification completed"
     log "INFO" ""
-    log "INFO" "🌐 pfSense Admin Panel Access:"
+    log "INFO" "🌐 Network Bridge Summary:"
+    log "INFO" "   vmbr0 (WAN): Connected to internet with additional IPs"
+    log "INFO" "   vmbr1 (LAN): 192.168.1.1/24 - pfSense management network"
+    log "INFO" "   vmbr2 (DMZ): 10.0.2.1/24 - public-facing services network"
+    log "INFO" ""
+    log "INFO" "🔧 pfSense Admin Panel Access:"
     log "INFO" "   URL: https://192.168.1.1 (or http://192.168.1.1)"
     log "INFO" "   Default credentials: admin / pfsense"
-    log "INFO" "   Note: You need to connect a device to the LAN network (vmbr1) to access this"
+    log "INFO" "   Note: Connect a device to the LAN network (vmbr1) to access this"
+    log "INFO" ""
+    log "INFO" "📋 Container Network Configuration Examples:"
+    log "INFO" "   LAN container: --net0 name=eth0,bridge=vmbr1,ip=192.168.1.100/24,gw=192.168.1.1"
+    log "INFO" "   DMZ container: --net0 name=eth0,bridge=vmbr2,ip=10.0.2.10/24,gw=10.0.2.1"
+}
+
+# Show current network status
+show_network_status() {
+    log "INFO" "Current Network Status:"
+    log "INFO" "======================"
+    
+    log "INFO" "=== WAN Bridge (vmbr0) ==="
+    if ip link show vmbr0 >/dev/null 2>&1; then
+        ip addr show vmbr0 2>/dev/null | grep "inet " | while IFS= read -r line; do
+            log "INFO" "  $line"
+        done
+    else
+        log "WARN" "  vmbr0 not found"
+    fi
+    
+    log "INFO" "=== LAN Bridge (vmbr1) ==="
+    if ip link show vmbr1 >/dev/null 2>&1; then
+        ip addr show vmbr1 2>/dev/null | grep "inet " | while IFS= read -r line; do
+            log "INFO" "  $line"
+        done
+    else
+        log "WARN" "  vmbr1 not found"
+    fi
+    
+    log "INFO" "=== DMZ Bridge (vmbr2) ==="
+    if ip link show vmbr2 >/dev/null 2>&1; then
+        ip addr show vmbr2 2>/dev/null | grep "inet " | while IFS= read -r line; do
+            log "INFO" "  $line"
+        done
+    else
+        log "WARN" "  vmbr2 not found"
+    fi
+    
+    log "INFO" "=== NAT Rules ==="
+    if iptables -t nat -L POSTROUTING 2>/dev/null | grep -q "MASQUERADE"; then
+        log "INFO" "  ✓ NAT rules configured"
+    else
+        log "WARN" "  ✗ NAT rules missing"
+    fi
 }
 
 # Parse command line arguments
@@ -1402,6 +1526,11 @@ parse_arguments() {
                 show_network_status
                 log "INFO" "Network configuration fix completed!"
                 log "INFO" "pfSense admin panel should be accessible at: http://192.168.1.1"
+                exit 0
+                ;;
+            --status)
+                log "INFO" "Showing current network status..."
+                show_network_status
                 exit 0
                 ;;
             --generate-config)
@@ -1435,6 +1564,8 @@ Configure network settings for Hetzner Proxmox setup.
 
 OPTIONS:
     --reset              Reset network to ariadata pve-install.sh compatible configuration
+    --fix                Ensure network configuration is properly applied (verify/fix bridges)
+    --status             Show current network bridge status
     --generate-config    Create a configuration file template
     --verbose, -v        Enable verbose output
     --help, -h           Show this help message

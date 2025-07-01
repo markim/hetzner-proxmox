@@ -28,6 +28,50 @@ PFSENSE_DMZ_SUBNET="${PFSENSE_DMZ_SUBNET:-10.0.2.0/24}"
 PFSENSE_DHCP_START="${PFSENSE_DHCP_START:-192.168.1.100}"
 PFSENSE_DHCP_END="${PFSENSE_DHCP_END:-192.168.1.200}"
 
+# Ensure network bridges are properly configured
+ensure_network_bridges() {
+    log "INFO" "Ensuring all network bridges are properly configured..."
+    
+    # Run network configuration to ensure everything is set up
+    if [[ -f "$SCRIPT_DIR/scripts/setup-network.sh" ]]; then
+        log "INFO" "Running network configuration check and fixes..."
+        bash "$SCRIPT_DIR/scripts/setup-network.sh" --fix 2>/dev/null || {
+            log "WARN" "Network configuration script failed, continuing with manual setup..."
+        }
+    fi
+    
+    # Ensure vmbr1 exists and is configured
+    if ! ip link show vmbr1 >/dev/null 2>&1; then
+        log "ERROR" "vmbr1 bridge still not found after network configuration"
+        return 1
+    fi
+    
+    # Ensure vmbr2 exists and is configured  
+    if ! ip link show vmbr2 >/dev/null 2>&1; then
+        log "WARN" "vmbr2 bridge still not found, creating it manually..."
+        
+        # Create vmbr2 bridge
+        if ip link add name vmbr2 type bridge 2>/dev/null; then
+            log "INFO" "✓ Created vmbr2 bridge"
+            
+            # Configure vmbr2 IP
+            if ip addr add 10.0.2.1/24 dev vmbr2 2>/dev/null; then
+                log "INFO" "✓ Added IP 10.0.2.1/24 to vmbr2"
+            fi
+            
+            # Bring up vmbr2
+            if ip link set vmbr2 up 2>/dev/null; then
+                log "INFO" "✓ vmbr2 interface is up"
+            fi
+        else
+            log "ERROR" "Failed to create vmbr2 bridge"
+            return 1
+        fi
+    fi
+    
+    log "INFO" "✓ All network bridges are properly configured"
+}
+
 # Validate prerequisites
 validate_prerequisites() {
     log "INFO" "Validating pfSense setup prerequisites..."
@@ -53,8 +97,67 @@ validate_prerequisites() {
     
     # Check if vmbr2 exists (DMZ bridge - optional but recommended)
     if ! ip link show vmbr2 >/dev/null 2>&1; then
-        log "WARN" "DMZ bridge vmbr2 not found (optional but recommended)"
-        log "WARN" "DMZ interface will not be configured for pfSense"
+        log "WARN" "DMZ bridge vmbr2 not found - creating it now..."
+        
+        # Create vmbr2 bridge
+        if ip link add name vmbr2 type bridge 2>/dev/null; then
+            log "INFO" "✓ Created vmbr2 bridge"
+            
+            # Configure vmbr2 IP
+            if ip addr add 10.0.2.1/24 dev vmbr2 2>/dev/null; then
+                log "INFO" "✓ Added IP 10.0.2.1/24 to vmbr2"
+            fi
+            
+            # Bring up vmbr2
+            if ip link set vmbr2 up 2>/dev/null; then
+                log "INFO" "✓ vmbr2 interface is up"
+            fi
+            
+            # Make persistent by updating /etc/network/interfaces if needed
+            if ! grep -q "auto vmbr2" /etc/network/interfaces 2>/dev/null; then
+                log "INFO" "Adding vmbr2 configuration to /etc/network/interfaces..."
+                cat >> /etc/network/interfaces << EOF
+
+# DMZ Bridge for additional services
+auto vmbr2
+iface vmbr2 inet static
+    address 10.0.2.1/24
+    bridge-ports none
+    bridge-stp off
+    bridge-fd 0
+    bridge-maxwait 0
+EOF
+                log "INFO" "✓ Added vmbr2 configuration to interfaces file"
+            fi
+        else
+            log "ERROR" "Failed to create vmbr2 bridge"
+            log "WARN" "DMZ interface will not be configured for pfSense"
+        fi
+    else
+        log "INFO" "✓ DMZ bridge vmbr2 found"
+        
+        # Verify vmbr2 has correct IP
+        local vmbr2_ip
+        vmbr2_ip=$(ip addr show vmbr2 2>/dev/null | grep "inet " | awk '{print $2}' | cut -d'/' -f1 | head -n1)
+        if [[ "$vmbr2_ip" != "10.0.2.1" ]]; then
+            log "INFO" "Configuring vmbr2 with correct IP address..."
+            if [[ -n "$vmbr2_ip" && "$vmbr2_ip" != "10.0.2.1" ]]; then
+                # Remove incorrect IP
+                ip addr del "${vmbr2_ip}/24" dev vmbr2 2>/dev/null || true
+            fi
+            
+            # Add correct IP
+            if ip addr add 10.0.2.1/24 dev vmbr2 2>/dev/null; then
+                log "INFO" "✓ Added IP 10.0.2.1/24 to vmbr2"
+            else
+                log "DEBUG" "IP 10.0.2.1/24 already exists on vmbr2"
+            fi
+        fi
+        
+        # Ensure vmbr2 is up
+        if ip link set vmbr2 up 2>/dev/null; then
+            log "INFO" "✓ vmbr2 interface is up"
+        fi
     fi
     
     # Validate network configuration is proper for pfSense
@@ -186,13 +289,9 @@ create_pfsense_vm() {
     # LAN interface (vmbr1) - auto-generated MAC is fine for internal networks
     qm set "$PFSENSE_VM_ID" --net1 "virtio,bridge=vmbr1,firewall=0"
     
-    # DMZ interface (vmbr2) - only if bridge exists
-    if ip link show vmbr2 >/dev/null 2>&1; then
-        qm set "$PFSENSE_VM_ID" --net2 "virtio,bridge=vmbr2,firewall=0"
-        log "INFO" "DMZ interface configured on vmbr2"
-    else
-        log "INFO" "DMZ interface skipped (vmbr2 not available)"
-    fi
+    # DMZ interface (vmbr2) - configure it since we ensure it exists
+    qm set "$PFSENSE_VM_ID" --net2 "virtio,bridge=vmbr2,firewall=0"
+    log "INFO" "DMZ interface configured on vmbr2"
     
     # Configure VGA and other settings optimized for pfSense
     qm set "$PFSENSE_VM_ID" \
@@ -208,9 +307,7 @@ create_pfsense_vm() {
     log "INFO" "  - Disk: ${PFSENSE_DISK_SIZE}GB with cache=writeback"
     log "INFO" "  - WAN Interface: vmbr0 → $PFSENSE_WAN_IP"
     log "INFO" "  - LAN Interface: vmbr1 → $PFSENSE_LAN_IP"
-    if ip link show vmbr2 >/dev/null 2>&1; then
-        log "INFO" "  - DMZ Interface: vmbr2 → $PFSENSE_DMZ_IP"
-    fi
+    log "INFO" "  - DMZ Interface: vmbr2 → $PFSENSE_DMZ_IP"
 }
 
 
@@ -240,10 +337,8 @@ show_management_commands() {
     echo "WAN IP:             $PFSENSE_WAN_IP"
     echo "LAN IP:             $PFSENSE_LAN_IP"
     echo "LAN Subnet:         $PFSENSE_LAN_SUBNET"
-    if ip link show vmbr2 >/dev/null 2>&1; then
-        echo "DMZ IP:             $PFSENSE_DMZ_IP"
-        echo "DMZ Subnet:         $PFSENSE_DMZ_SUBNET"
-    fi
+    echo "DMZ IP:             $PFSENSE_DMZ_IP"
+    echo "DMZ Subnet:         $PFSENSE_DMZ_SUBNET"
     echo "Web Interface:      https://$PFSENSE_LAN_IP"
     echo "Default Login:      admin / pfsense"
     echo
@@ -328,8 +423,18 @@ EXAMPLES:
 
 PREREQUISITES:
     - Network configuration must be completed first
-    - Additional IP addresses configured
-    - Network bridges (vmbr0, vmbr1, vmbr2) must exist
+    - Additional IP addresses configured (optional)
+    - Network bridges (vmbr0, vmbr1, vmbr2) must exist or will be created
+
+NETWORK REQUIREMENTS:
+    Run this first if network is not configured:
+    ./scripts/setup-network.sh
+    
+    Or to fix/verify network configuration:
+    ./scripts/setup-network.sh --fix
+    
+    To check current network status:
+    ./scripts/setup-network.sh --status
 
 EOF
 }
@@ -355,6 +460,9 @@ main() {
     
     # Validate prerequisites
     validate_prerequisites
+    
+    # Ensure network bridges are properly configured
+    ensure_network_bridges
     
     # Download pfSense ISO
     download_pfsense_iso
