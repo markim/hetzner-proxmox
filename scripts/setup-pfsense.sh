@@ -22,7 +22,12 @@ PFSENSE_MEMORY="${PFSENSE_MEMORY:-2048}"
 PFSENSE_DISK_SIZE="${PFSENSE_DISK_SIZE:-8}"
 PFSENSE_WAN_IP="${PFSENSE_WAN_IP:-}"
 PFSENSE_LAN_IP="${PFSENSE_LAN_IP:-192.168.1.1}"
+PFSENSE_LAN_SUBNET="${PFSENSE_LAN_SUBNET:-192.168.1.0/24}"
 PFSENSE_DMZ_IP="${PFSENSE_DMZ_IP:-10.0.2.1}"
+PFSENSE_DMZ_SUBNET="${PFSENSE_DMZ_SUBNET:-10.0.2.0/24}"
+PFSENSE_DHCP_START="${PFSENSE_DHCP_START:-192.168.1.100}"
+PFSENSE_DHCP_END="${PFSENSE_DHCP_END:-192.168.1.200}"
+PFSENSE_CONFIG_DIR="$SCRIPT_DIR/config/pfsense"
 
 # Validate prerequisites
 validate_prerequisites() {
@@ -51,6 +56,25 @@ validate_prerequisites() {
     if ! ip link show vmbr2 >/dev/null 2>&1; then
         log "WARN" "DMZ bridge vmbr2 not found (optional but recommended)"
         log "WARN" "DMZ interface will not be configured for pfSense"
+    fi
+    
+    # Validate network configuration is proper for pfSense
+    local vmbr1_ip
+    vmbr1_ip=$(ip addr show vmbr1 2>/dev/null | grep "inet " | awk '{print $2}' | cut -d'/' -f1 | head -n1)
+    if [[ "$vmbr1_ip" != "192.168.1.1" ]]; then
+        log "ERROR" "vmbr1 must have IP 192.168.1.1 for pfSense LAN configuration"
+        log "ERROR" "Current vmbr1 IP: ${vmbr1_ip:-none}"
+        log "ERROR" "Run network configuration to fix this: ./scripts/configure-network.sh"
+        return 1
+    fi
+    
+    local vmbr2_ip
+    if ip link show vmbr2 >/dev/null 2>&1; then
+        vmbr2_ip=$(ip addr show vmbr2 2>/dev/null | grep "inet " | awk '{print $2}' | cut -d'/' -f1 | head -n1)
+        if [[ "$vmbr2_ip" != "10.0.2.1" ]]; then
+            log "WARN" "vmbr2 should have IP 10.0.2.1 for pfSense DMZ configuration"
+            log "WARN" "Current vmbr2 IP: ${vmbr2_ip:-none}"
+        fi
     fi
     
     # Check for available additional IP
@@ -128,10 +152,10 @@ download_pfsense_iso() {
 create_pfsense_vm() {
     log "INFO" "Creating pfSense VM with ID: $PFSENSE_VM_ID"
     
-    # Create VM
+    # Create VM with optimized settings for pfSense
     qm create "$PFSENSE_VM_ID" \
         --name "pfSense-Firewall" \
-        --description "pfSense Firewall VM with WAN IP: $PFSENSE_WAN_IP" \
+        --description "pfSense Firewall VM - WAN: $PFSENSE_WAN_IP | LAN: $PFSENSE_LAN_IP | DMZ: $PFSENSE_DMZ_IP" \
         --ostype other \
         --memory "$PFSENSE_MEMORY" \
         --cores "$PFSENSE_CPU_CORES" \
@@ -139,14 +163,15 @@ create_pfsense_vm() {
         --onboot 1 \
         --tablet 0 \
         --boot order=ide2 \
-        --cdrom "$PFSENSE_ISO_PATH"
+        --cdrom "$PFSENSE_ISO_PATH" \
+        --machine q35
     
-    # Add SCSI controller and disk
+    # Add SCSI controller and disk with optimal settings for pfSense
     qm set "$PFSENSE_VM_ID" \
         --scsihw virtio-scsi-pci \
-        --scsi0 "local-zfs:$PFSENSE_DISK_SIZE"
+        --scsi0 "local-zfs:$PFSENSE_DISK_SIZE,cache=writeback,discard=on,iothread=1"
     
-    # Configure network interfaces
+    # Configure network interfaces with proper virtio drivers
     # WAN interface (vmbr0) - use MAC address if available
     local wan_net_config="virtio,bridge=vmbr0,firewall=0"
     if [[ -n "${ADDITIONAL_MACS_ARRAY[*]:-}" && ${#ADDITIONAL_MACS_ARRAY[@]} -gt 0 && -n "${ADDITIONAL_MACS_ARRAY[0]}" ]]; then
@@ -155,6 +180,7 @@ create_pfsense_vm() {
     else
         log "WARN" "No MAC address specified for WAN interface - using auto-generated"
         log "WARN" "This may cause routing issues with Hetzner additional IPs"
+        log "WARN" "Configure MAC addresses in additional-ips.conf for proper routing"
     fi
     qm set "$PFSENSE_VM_ID" --net0 "$wan_net_config"
     
@@ -169,104 +195,299 @@ create_pfsense_vm() {
         log "INFO" "DMZ interface skipped (vmbr2 not available)"
     fi
     
-    # Configure VGA and other settings
+    # Configure VGA and other settings optimized for pfSense
     qm set "$PFSENSE_VM_ID" \
         --vga std \
         --serial0 socket \
-        --watchdog i6300esb,action=reset
+        --watchdog i6300esb,action=reset \
+        --args "-chardev socket,id=qmp,path=/var/run/qemu-server/$PFSENSE_VM_ID.qmp,server,nowait -mon chardev=qmp,mode=control"
     
     log "INFO" "pfSense VM created successfully"
     log "INFO" "VM Configuration:"
     log "INFO" "  - VM ID: $PFSENSE_VM_ID"
     log "INFO" "  - Memory: ${PFSENSE_MEMORY}MB"
     log "INFO" "  - CPU Cores: $PFSENSE_CPU_CORES"
-    log "INFO" "  - Disk: $PFSENSE_DISK_SIZE"
-    log "INFO" "  - WAN Interface: vmbr0 (connects to $PFSENSE_WAN_IP)"
-    log "INFO" "  - LAN Interface: vmbr1 (192.168.1.1/24)"
-    log "INFO" "  - DMZ Interface: vmbr2 (10.0.2.0/24)"
+    log "INFO" "  - Disk: ${PFSENSE_DISK_SIZE}GB with cache=writeback"
+    log "INFO" "  - WAN Interface: vmbr0 → $PFSENSE_WAN_IP"
+    log "INFO" "  - LAN Interface: vmbr1 → $PFSENSE_LAN_IP"
+    if ip link show vmbr2 >/dev/null 2>&1; then
+        log "INFO" "  - DMZ Interface: vmbr2 → $PFSENSE_DMZ_IP"
+    fi
 }
 
-# Generate pfSense setup documentation
+# Generate pfSense setup documentation and configuration files
 generate_pfsense_documentation() {
-    log "INFO" "Generating pfSense setup documentation..."
+    log "INFO" "Generating pfSense setup documentation and configuration files..."
     
     local config_dir="$SCRIPT_DIR/config/pfsense"
     mkdir -p "$config_dir"
     
-    # Generate setup instructions instead of config template
+    # Generate detailed setup instructions
     cat > "$config_dir/setup-instructions.md" << EOF
-# pfSense Manual Configuration Guide
+# pfSense Comprehensive Setup Guide
 
-After pfSense installation, you'll need to configure it manually through the console or web interface.
+## Overview
+This guide walks you through configuring pfSense as a firewall/router for your Hetzner Proxmox environment.
 
-## Network Interface Configuration
+**Network Architecture:**
+- **WAN (Internet)**: $PFSENSE_WAN_IP via vmbr0 
+- **LAN (Internal)**: $PFSENSE_LAN_SUBNET via vmbr1
+- **DMZ (Services)**: $PFSENSE_DMZ_SUBNET via vmbr2
 
-### WAN Interface (vtnet0)
-- **IP Address**: $PFSENSE_WAN_IP
-- **Subnet**: ${ADDITIONAL_NETMASKS_ARRAY[0]:-255.255.255.192}
-- **Gateway**: ${ADDITIONAL_GATEWAYS_ARRAY[0]:-Check your Hetzner control panel}
+## Phase 1: pfSense Installation
 
-### LAN Interface (vtnet1) 
-- **IP Address**: $PFSENSE_LAN_IP
-- **Subnet**: 255.255.255.0 (24-bit)
-- **DHCP Range**: 192.168.1.100 - 192.168.1.200
+### 1. Start the VM and Install
+\`\`\`bash
+# Start the VM
+qm start $PFSENSE_VM_ID
 
-### DMZ Interface (vtnet2) - Optional
-- **IP Address**: $PFSENSE_DMZ_IP  
-- **Subnet**: 255.255.255.0 (24-bit)
-- **DHCP Range**: 10.0.2.100 - 10.0.2.200
+# Connect to console for installation
+qm terminal $PFSENSE_VM_ID
+\`\`\`
 
-## Initial Setup Steps
+### 2. Install pfSense to Disk
+- Boot from ISO (should happen automatically)
+- Choose "Install pfSense"
+- Accept license, select disk, confirm installation
+- **Important**: Choose "Reboot" when installation completes
 
-1. **Boot from ISO and install pfSense to disk**
-2. **Reboot and remove ISO**
-3. **Console Configuration**:
-   - Assign interfaces: WAN=vtnet0, LAN=vtnet1, OPT1=vtnet2
-   - Configure WAN interface with static IP
-   - Configure LAN interface with $PFSENSE_LAN_IP
-4. **Web Interface Setup**:
-   - Access: https://$PFSENSE_LAN_IP
-   - Login: admin / pfsense
-   - **CHANGE DEFAULT PASSWORD IMMEDIATELY**
-5. **Configure firewall rules and NAT as needed**
+### 3. Remove ISO and Restart
+\`\`\`bash
+# Stop VM
+qm stop $PFSENSE_VM_ID
 
-## DNS Servers
-- Primary: 8.8.8.8
-- Secondary: 8.8.4.4
+# Remove ISO
+qm set $PFSENSE_VM_ID --ide2 none
 
-## Important Notes
-- Default credentials: admin / pfsense
-- Change the default password during initial setup
-- Configure firewall rules to secure your environment
-- Enable DHCP on LAN/DMZ if needed
+# Start VM again
+qm start $PFSENSE_VM_ID
+qm terminal $PFSENSE_VM_ID
+\`\`\`
+
+## Phase 2: Interface Configuration
+
+### 1. Initial Interface Assignment
+When pfSense boots, you'll see the interface assignment menu:
+- **WAN**: vtnet0 (connected to vmbr0)
+- **LAN**: vtnet1 (connected to vmbr1)
+$(if ip link show vmbr2 >/dev/null 2>&1; then echo "- **OPT1/DMZ**: vtnet2 (connected to vmbr2)"; fi)
+
+**Complete Interface Assignment:**
+1. Select option 1 "Assign Interfaces"
+2. Enter interface assignments:
+   - WAN: \`vtnet0\`
+   - LAN: \`vtnet1\`
+$(if ip link show vmbr2 >/dev/null 2>&1; then echo "   - OPT1: \`vtnet2\`"; fi)
+3. Confirm with "y"
+
+### 2. Configure WAN Interface
+1. Select option 2 "Set interface(s) IP address"
+2. Select "1" for WAN
+3. Configure static IP:
+   - IP: \`$PFSENSE_WAN_IP\`
+   - Subnet: \`${ADDITIONAL_NETMASKS_ARRAY[0]:-/26}\`
+   - Gateway: \`${ADDITIONAL_GATEWAYS_ARRAY[0]:-Check Hetzner panel}\`
+4. Configure IPv6: "n" (unless you have IPv6)
+5. Enable DHCP on WAN: "n"
+6. Revert to HTTP for webConfigurator: "n"
+
+### 3. Configure LAN Interface  
+1. Select option 2 "Set interface(s) IP address"
+2. Select "2" for LAN
+3. Configure static IP:
+   - IP: \`$PFSENSE_LAN_IP\`
+   - Subnet: \`24\` (255.255.255.0)
+4. Configure IPv6: "n" 
+5. Enable DHCP on LAN: "y"
+   - Start: \`$PFSENSE_DHCP_START\`
+   - End: \`$PFSENSE_DHCP_END\`
+6. Revert to HTTP for webConfigurator: "n"
+
+$(if ip link show vmbr2 >/dev/null 2>&1; then cat << 'DMZEOF'
+### 4. Configure DMZ/OPT1 Interface
+1. Select option 2 "Set interface(s) IP address"
+2. Select "3" for OPT1
+3. Configure static IP:
+   - IP: `10.0.2.1`
+   - Subnet: `24` (255.255.255.0)
+4. Configure IPv6: "n"
+5. Enable DHCP on OPT1: "y"
+   - Start: `10.0.2.100`
+   - End: `10.0.2.200`
+6. Revert to HTTP for webConfigurator: "n"
+DMZEOF
+fi)
+
+## Phase 3: Web Interface Setup
+
+### 1. Access Web Interface
+- URL: \`https://$PFSENSE_LAN_IP\`
+- Default credentials: \`admin\` / \`pfsense\`
+- **⚠️ IMMEDIATELY change the default password!**
+
+### 2. Run Setup Wizard
+1. **General Information**:
+   - Hostname: \`pfsense\`
+   - Domain: \`localdomain\` or your domain
+   - DNS: \`8.8.8.8, 8.8.4.4\`
+
+2. **Time Server Information**:
+   - Timezone: Select your timezone
+   - NTP Server: \`pool.ntp.org\`
+
+3. **Configure WAN Interface**: Should be pre-configured
+4. **Configure LAN Interface**: Should be pre-configured  
+5. **Set Admin Password**: **Change from default!**
+6. **Reload Configuration**
+
+### 3. Essential Security Configuration
+
+#### Firewall Rules (System → Firewall → Rules)
+**LAN Rules** (allow internal traffic):
+- Allow LAN to any (default rule is fine)
+- Consider restricting if needed
+
+$(if ip link show vmbr2 >/dev/null 2>&1; then cat << 'DMZRULESEOF'
+**DMZ/OPT1 Rules** (secure DMZ access):
+- Allow DMZ to WAN (for internet access)
+- Block DMZ to LAN (for security)
+- Allow specific services from LAN to DMZ as needed
+DMZRULESEOF
+fi)
+
+**WAN Rules** (should be restrictive by default):
+- Only allow established/related connections
+- Add specific rules for services you want to expose
+
+#### NAT Configuration (Firewall → NAT)
+- **Outbound NAT**: Automatic (default)
+- **Port Forwards**: Configure as needed for services
+
+## Phase 4: Testing and Validation
+
+### 1. Test Connectivity
+\`\`\`bash
+# Create a test VM on LAN network
+qm create 999 --name test-vm --net0 virtio,bridge=vmbr1
+
+# Or test from Proxmox host
+# Add a temporary IP on vmbr1 for testing
+ip addr add 192.168.1.10/24 dev vmbr1
+ping $PFSENSE_LAN_IP
+# Remove test IP when done
+ip addr del 192.168.1.10/24 dev vmbr1
+\`\`\`
+
+### 2. Verify Routing
+- LAN devices should get DHCP from pfSense
+- LAN devices should be able to reach internet through pfSense
+- pfSense web interface should be accessible from LAN
+
+## Phase 5: Production Configuration
+
+### 1. SSL Certificate
+- System → Cert Manager → CAs → Add (create internal CA)
+- System → Cert Manager → Certificates → Add (create cert for web interface)
+- System → Advanced → Admin Access → SSL Certificate (apply new cert)
+
+### 2. Backup Configuration
+- Diagnostics → Backup & Restore → Download config
+
+### 3. Regular Maintenance
+- System → Update → Check for updates
+- Monitor logs: Status → System Logs
+- Review firewall logs: Status → System Logs → Firewall
+
+## Troubleshooting
+
+### Interface Issues
+- Check VM network settings: \`qm config $PFSENSE_VM_ID\`
+- Verify bridge configuration: \`ip addr show vmbr1\`
+- Check pfSense interface assignment: Menu option 1
+
+### Connectivity Issues  
+- Verify MAC address for WAN interface (critical for Hetzner)
+- Check firewall rules in pfSense web interface
+- Monitor pfSense logs for blocked traffic
+
+### Performance Issues
+- Consider increasing VM memory: \`qm set $PFSENSE_VM_ID --memory 4096\`
+- Enable hardware checksum offloading in pfSense
+- Monitor CPU usage in Proxmox
+
+## Next Steps
+1. Configure additional VMs on LAN network (vmbr1)
+2. Set up DMZ services if using vmbr2
+3. Configure VPN (if needed)
+4. Set up monitoring and alerting
+5. Regular security updates
+
+## Quick Reference
+- **pfSense VM ID**: $PFSENSE_VM_ID
+- **WAN IP**: $PFSENSE_WAN_IP
+- **LAN IP**: $PFSENSE_LAN_IP
+- **Web Interface**: https://$PFSENSE_LAN_IP
+- **Console**: \`qm terminal $PFSENSE_VM_ID\`
 EOF
 
-    log "INFO" "pfSense setup documentation created at: $config_dir/setup-instructions.md"
-    log "INFO" "Manual configuration required after pfSense installation"
+    # Generate pfSense configuration template for advanced users
+    generate_pfsense_config_template "$config_dir"
+    
+    log "INFO" "Documentation created:"
+    log "INFO" "  - Setup guide: $config_dir/setup-instructions.md"
+    log "INFO" "  - Config template: $config_dir/config-template.xml"
+    log "INFO" "  - Test script: $config_dir/test-network.sh"
 }
 
 
-
-# Show VM management commands
+# Show VM management commands and quick start guide
 show_management_commands() {
-    log "INFO" "pfSense VM Management Commands:"
+    log "INFO" "pfSense VM Management & Quick Start Guide"
     echo
-    echo "=== VM Control ==="
-    echo "Start VM:      qm start $PFSENSE_VM_ID"
-    echo "Stop VM:       qm stop $PFSENSE_VM_ID"
-    echo "Reset VM:      qm reset $PFSENSE_VM_ID"
-    echo "Console:       qm terminal $PFSENSE_VM_ID"
-    echo "Status:        qm status $PFSENSE_VM_ID"
+    echo "=== 🚀 QUICK START WORKFLOW ==="
+    echo "1. qm start $PFSENSE_VM_ID                    # Start the VM"
+    echo "2. qm terminal $PFSENSE_VM_ID                 # Console access for installation"
+    echo "3. Install pfSense to disk (follow prompts)"
+    echo "4. qm stop $PFSENSE_VM_ID && qm set $PFSENSE_VM_ID --ide2 none  # Remove ISO"
+    echo "5. qm start $PFSENSE_VM_ID                    # Start again"
+    echo "6. Configure interfaces via console (menu options 1 & 2)"
+    echo "7. Access web interface: https://$PFSENSE_LAN_IP"
     echo
-    echo "=== Access Information ==="
-    echo "WAN IP:        $PFSENSE_WAN_IP"
-    echo "LAN IP:        $PFSENSE_LAN_IP (https://$PFSENSE_LAN_IP)"
-    echo "DMZ IP:        $PFSENSE_DMZ_IP"
-    echo "Default Login: admin / pfsense"
+    echo "=== 🎛️ VM CONTROL ==="
+    echo "Start VM:           qm start $PFSENSE_VM_ID"
+    echo "Stop VM:            qm stop $PFSENSE_VM_ID"
+    echo "Reset VM:           qm reset $PFSENSE_VM_ID"
+    echo "Console Access:     qm terminal $PFSENSE_VM_ID"
+    echo "VM Status:          qm status $PFSENSE_VM_ID"
+    echo "VM Configuration:   qm config $PFSENSE_VM_ID"
     echo
-    echo "=== Documentation ==="
-    echo "Setup Guide:   config/pfsense/setup-instructions.md"
-    echo "Manual Config: Required after installation"
+    echo "=== 🌐 NETWORK INFORMATION ==="
+    echo "WAN IP:             $PFSENSE_WAN_IP"
+    echo "LAN IP:             $PFSENSE_LAN_IP"
+    echo "LAN Subnet:         $PFSENSE_LAN_SUBNET"
+    if ip link show vmbr2 >/dev/null 2>&1; then
+        echo "DMZ IP:             $PFSENSE_DMZ_IP"
+        echo "DMZ Subnet:         $PFSENSE_DMZ_SUBNET"
+    fi
+    echo "Web Interface:      https://$PFSENSE_LAN_IP"
+    echo "Default Login:      admin / pfsense"
+    echo
+    echo "=== 🔧 TESTING & VALIDATION ==="
+    echo "Test Network:       ./config/pfsense/test-network.sh"
+    echo "Check Bridges:      ip addr show vmbr1"
+    echo "Monitor VM:         qm monitor $PFSENSE_VM_ID"
+    echo
+    echo "=== 📚 DOCUMENTATION ==="
+    echo "Setup Guide:        config/pfsense/setup-instructions.md"
+    echo "Config Template:    config/pfsense/config-template.xml"
+    echo "Test Script:        config/pfsense/test-network.sh"
+    echo
+    echo "=== ⚠️ IMPORTANT NOTES ==="
+    echo "• Change default password IMMEDIATELY after first login"
+    echo "• Interface assignment: WAN=vtnet0, LAN=vtnet1, DMZ=vtnet2"
+    echo "• WAN requires correct MAC address for Hetzner routing"
+    echo "• LAN devices will connect to vmbr1 bridge"
+    echo "• DMZ devices will connect to vmbr2 bridge (if configured)"
     echo
 }
 
