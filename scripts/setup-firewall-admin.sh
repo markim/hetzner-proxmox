@@ -111,8 +111,8 @@ create_firewall_admin_vm() {
         --memory "$FIREWALL_ADMIN_MEMORY" \
         --cores "$FIREWALL_ADMIN_CORES" \
         --scsihw virtio-scsi-pci \
-        --scsi0 "local:$FIREWALL_ADMIN_DISK_SIZE" \
-        --ide2 "local:iso/BookwormPup64_10.0.11.iso,media=cdrom" \
+        --scsi0 "local-zfs:$FIREWALL_ADMIN_DISK_SIZE" \
+        --ide2 "local-zfs:iso/BookwormPup64_10.0.11.iso,media=cdrom" \
         --ostype l26 \
         --boot order=ide2 \
         --onboot 0 \
