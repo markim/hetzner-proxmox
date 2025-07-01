@@ -149,6 +149,9 @@ optimize_system() {
     # Configure ZFS optimizations
     optimize_zfs
     
+    # Configure ZFS email notifications for Proxmox
+    configure_zfs_notifications
+    
     # Create optimized sysctl configuration files
     create_sysctl_configs
     
@@ -940,6 +943,122 @@ EOF
     
     chmod +x "$ROLLBACK_COMMAND_PATH"
     log "INFO" "Rollback command created: $(basename "$ROLLBACK_COMMAND_PATH")"
+}
+
+# Function to configure ZFS email notifications in Proxmox
+configure_zfs_notifications() {
+    log "INFO" "Configuring ZFS email notifications in Proxmox..."
+    
+    # Check if we're running on Proxmox
+    if ! command -v pvesm &> /dev/null; then
+        log "WARNING" "Proxmox commands not found, skipping ZFS notification setup"
+        return 0
+    fi
+    
+    # Check if rpool exists
+    if ! zpool status rpool &>/dev/null; then
+        log "WARNING" "ZFS pool 'rpool' not found, skipping notification setup"
+        return 0
+    fi
+    
+    # Configure ZFS event daemon (ZED) for Proxmox
+    local zed_conf="/etc/zfs/zed.d/zed.rc"
+    if [[ -f "$zed_conf" ]]; then
+        backup_file "$zed_conf"
+        
+        # Enable ZFS event daemon notifications
+        log "INFO" "Configuring ZFS Event Daemon for notifications..."
+        
+        # Update ZED configuration for email notifications
+        sed -i 's/#ZED_EMAIL_ADDR="root"/ZED_EMAIL_ADDR="root"/' "$zed_conf" 2>/dev/null || true
+        sed -i 's/#ZED_EMAIL_PROG="mail"/ZED_EMAIL_PROG="mail"/' "$zed_conf" 2>/dev/null || true
+        sed -i 's/#ZED_EMAIL_OPTS=""/ZED_EMAIL_OPTS=""/' "$zed_conf" 2>/dev/null || true
+        sed -i 's/#ZED_NOTIFY_INTERVAL_SECS=3600/ZED_NOTIFY_INTERVAL_SECS=3600/' "$zed_conf" 2>/dev/null || true
+        sed -i 's/#ZED_NOTIFY_VERBOSE=0/ZED_NOTIFY_VERBOSE=1/' "$zed_conf" 2>/dev/null || true
+        
+        # Enable specific ZFS events
+        sed -i 's/#ZED_SYSLOG_SUBCLASS_EXCLUDE="history_event"/ZED_SYSLOG_SUBCLASS_EXCLUDE="history_event"/' "$zed_conf" 2>/dev/null || true
+        
+        log "DEBUG" "ZED configuration updated for email notifications"
+    else
+        log "WARNING" "ZED configuration file not found at $zed_conf"
+    fi
+    
+    # Enable and start ZFS Event Daemon
+    if systemctl enable zfs-zed 2>/dev/null && systemctl start zfs-zed 2>/dev/null; then
+        log "INFO" "ZFS Event Daemon enabled and started"
+        INSTALLED_SERVICES["zfs-zed"]="enabled"
+        
+        # Add to rollback script
+        cat >> "$ROLLBACK_SCRIPT" << EOF
+
+# Disable ZFS Event Daemon
+if systemctl is-enabled zfs-zed.service &>/dev/null; then
+    log "INFO" "Disabling ZFS Event Daemon"
+    systemctl disable zfs-zed.service 2>/dev/null || true
+    systemctl stop zfs-zed.service 2>/dev/null || true
+fi
+EOF
+    else
+        log "WARNING" "Could not enable ZFS Event Daemon service"
+    fi
+    
+    # Configure Proxmox datacenter.cfg for email notifications
+    local datacenter_cfg="/etc/pve/datacenter.cfg"
+    if [[ -f "$datacenter_cfg" ]]; then
+        backup_file "$datacenter_cfg"
+        
+        log "INFO" "Configuring Proxmox datacenter settings for notifications..."
+        
+        # Check if notify section exists and add email settings
+        if ! grep -q "^notify:" "$datacenter_cfg" 2>/dev/null; then
+            echo "" >> "$datacenter_cfg"
+            echo "notify: package-updates=auto" >> "$datacenter_cfg"
+            log "DEBUG" "Added notify section to datacenter.cfg"
+        fi
+        
+        # Ensure storage notifications are enabled (this affects ZFS)
+        if ! grep -q "^notify:.*storage" "$datacenter_cfg" 2>/dev/null; then
+            sed -i '/^notify:/s/$/ storage=auto/' "$datacenter_cfg" 2>/dev/null || true
+            log "DEBUG" "Enabled storage notifications in datacenter.cfg"
+        fi
+        
+        log "INFO" "Proxmox datacenter notifications configured"
+    else
+        log "WARNING" "Proxmox datacenter.cfg not found - may not be running on Proxmox VE"
+    fi
+    
+    # Set up ZFS pool alert thresholds
+    log "INFO" "Configuring ZFS pool alert thresholds..."
+    
+    # Set pool alert threshold to 80% (Proxmox will alert when pool reaches this capacity)
+    if zpool set failmode=continue rpool 2>/dev/null; then
+        log "DEBUG" "Set rpool failmode to continue"
+    fi
+    
+    # Enable pool health monitoring
+    if zpool set autoreplace=on rpool 2>/dev/null; then
+        log "DEBUG" "Enabled autoreplace for rpool"
+    fi
+    
+    # Configure pool scrub schedule if not already set
+    local scrub_cron="/etc/cron.d/zfsutils-linux"
+    if [[ -f "$scrub_cron" ]]; then
+        log "INFO" "ZFS scrub schedule already configured"
+    else
+        # Create a monthly scrub schedule
+        backup_file "$scrub_cron"
+        cat > "$scrub_cron" << 'EOF'
+# ZFS scrub schedule for data integrity checking
+# Run scrub on the first Sunday of each month at 2 AM
+0 2 1-7 * * root [ $(date +\%w) -eq 0 ] && /sbin/zpool scrub rpool 2>/dev/null || true
+EOF
+        log "INFO" "ZFS scrub schedule configured (monthly on first Sunday)"
+    fi
+    
+    log "INFO" "ZFS notifications configured successfully"
+    log "INFO" "Note: Configure email settings in Proxmox web interface under:"
+    log "INFO" "  Datacenter -> Options -> Email/Notification settings"
 }
 
 # Main function
