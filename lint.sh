@@ -5,21 +5,17 @@
 
 set -euo pipefail
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+# Get the project root directory
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Source common functions for color handling
+source "$PROJECT_ROOT/lib/common.sh"
 
 # Counters
 TOTAL_FILES=0
 PASSED_FILES=0
 FAILED_FILES=0
 WARNINGS=0
-
-# Get the project root directory
-PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Function to print colored output
 print_status() {

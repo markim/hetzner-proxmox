@@ -51,7 +51,7 @@ check_mac_configuration() {
                     has_issues=true
                 fi
             else
-                printf "%s✗ MAC: NOT CONFIGURED%s\n" "$RED" "$NC"
+                printf "${RED}✗ MAC: NOT CONFIGURED${NC}\n"
                 has_issues=true
             fi
             
@@ -60,7 +60,7 @@ check_mac_configuration() {
             echo
         done
     else
-        echo "${RED}✗ No additional IPs configured${NC}"
+        echo -e "${RED}✗ No additional IPs configured${NC}"
         echo
         echo "Please configure additional IPs in one of these ways:"
         echo "1. Create config/additional-ips.conf"
@@ -69,7 +69,7 @@ check_mac_configuration() {
     fi
     
     if [[ "$has_issues" == "true" ]]; then
-        echo "${RED}⚠️  MAC ADDRESS ISSUES DETECTED${NC}"
+        echo -e "${RED}⚠️  MAC ADDRESS ISSUES DETECTED${NC}"
         echo
         echo "This setup will NOT work properly with Hetzner additional IPs!"
         echo "Hetzner requires specific MAC addresses for each additional IP."
@@ -77,7 +77,7 @@ check_mac_configuration() {
         show_mac_help
         return 1
     else
-        echo "${GREEN}✓ All MAC addresses are properly configured${NC}"
+        echo -e "${GREEN}✓ All MAC addresses are properly configured${NC}"
         echo
         return 0
     fi
@@ -157,15 +157,15 @@ check_vm_mac_addresses() {
                 if [[ -n "$vm_mac" ]]; then
                     printf "  WAN interface MAC: %s" "$vm_mac"
                     if [[ -n "${ADDITIONAL_MACS_ARRAY[0]:-}" ]] && [[ "$vm_mac" == "${ADDITIONAL_MACS_ARRAY[0]}" ]]; then
-                        printf " %s✓ MATCHES%s\n" "$GREEN" "$NC"
+                        printf " ${GREEN}✓ MATCHES${NC}\n"
                     else
-                        printf " %s✗ MISMATCH%s\n" "$RED" "$NC"
+                        printf " ${RED}✗ MISMATCH${NC}\n"
                         if [[ -n "${ADDITIONAL_MACS_ARRAY[0]:-}" ]]; then
                             printf "    Expected: %s\n" "${ADDITIONAL_MACS_ARRAY[0]}"
                         fi
                     fi
                 else
-                    printf "  WAN interface MAC: %sauto-generated%s\n" "$YELLOW" "$NC"
+                    printf "  WAN interface MAC: ${YELLOW}auto-generated${NC}\n"
                 fi
             fi
         fi
@@ -192,15 +192,15 @@ check_vm_mac_addresses() {
                 if [[ -n "$vm_mac" ]]; then
                     printf "  WAN interface MAC: %s" "$vm_mac"
                     if [[ -n "${ADDITIONAL_MACS_ARRAY[1]:-}" ]] && [[ "$vm_mac" == "${ADDITIONAL_MACS_ARRAY[1]}" ]]; then
-                        printf " %s✓ MATCHES%s\n" "$GREEN" "$NC"
+                        printf " ${GREEN}✓ MATCHES${NC}\n"
                     else
-                        printf " %s✗ MISMATCH%s\n" "$RED" "$NC"
+                        printf " ${RED}✗ MISMATCH${NC}\n"
                         if [[ -n "${ADDITIONAL_MACS_ARRAY[1]:-}" ]]; then
                             printf "    Expected: %s\n" "${ADDITIONAL_MACS_ARRAY[1]}"
                         fi
                     fi
                 else
-                    printf "  WAN interface MAC: %sauto-generated%s\n" "$YELLOW" "$NC"
+                    printf "  WAN interface MAC: ${YELLOW}auto-generated${NC}\n"
                 fi
             fi
         fi
@@ -232,17 +232,17 @@ main() {
     echo "=== SUMMARY ==="
     
     if [[ "$config_ok" == "true" ]]; then
-        echo "${GREEN}✓ Configuration: MAC addresses properly configured${NC}"
+        echo -e "${GREEN}✓ Configuration: MAC addresses properly configured${NC}"
     else
-        echo "${RED}✗ Configuration: MAC address issues found${NC}"
+        echo -e "${RED}✗ Configuration: MAC address issues found${NC}"
     fi
     
     echo
     if [[ "$config_ok" == "true" ]]; then
-        echo "${GREEN}Ready to proceed with Proxmox setup!${NC}"
+        echo -e "${GREEN}Ready to proceed with Proxmox setup!${NC}"
         echo
     else
-        echo "${RED}Please fix MAC address configuration before proceeding${NC}"
+        echo -e "${RED}Please fix MAC address configuration before proceeding${NC}"
         echo
         echo "The setup will not work properly without correct MAC addresses!"
     fi
