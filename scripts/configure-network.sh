@@ -5,6 +5,18 @@
 
 set -euo pipefail
 
+# Custom error handler
+error_handler() {
+    local line_no=$1
+    local error_code=$2
+    log "ERROR" "Script failed at line $line_no with exit code $error_code"
+    log "ERROR" "This error occurred in the configure-network script"
+    exit "$error_code"
+}
+
+# Set up error handling
+trap 'error_handler ${LINENO} $?' ERR
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Source common functions
@@ -452,7 +464,7 @@ create_ariadata_compatible_config() {
     
     log "DEBUG" "Getting CIDR from interface $SSH_INTERFACE for IP $CURRENT_IP"
     # Try to get CIDR from current IP configuration
-    current_cidr=$(ip addr show "$SSH_INTERFACE" | grep "inet " | grep "$CURRENT_IP" | awk '{print $2}' | head -n1)
+    current_cidr=$(ip addr show "$SSH_INTERFACE" | grep "inet " | grep "$CURRENT_IP" | awk '{print $2}' | head -n1 || true)
     if [[ -z "$current_cidr" ]]; then
         log "WARN" "Could not determine current CIDR, using /26 as fallback for Hetzner"
         current_cidr="$CURRENT_IP/26"
@@ -461,7 +473,7 @@ create_ariadata_compatible_config() {
     
     # Get current gateway
     log "DEBUG" "Getting gateway"
-    current_gateway=$(ip route | grep default | awk '{print $3}' | head -n1)
+    current_gateway=$(ip route | grep default | awk '{print $3}' | head -n1 || true)
     if [[ -z "$current_gateway" ]]; then
         log "ERROR" "Could not determine current gateway"
         return 1
@@ -474,25 +486,33 @@ create_ariadata_compatible_config() {
         interface_for_mac="${PHYSICAL_INTERFACE}"
     fi
     log "DEBUG" "Getting MAC for interface: $interface_for_mac"
-    current_mac=$(ip link show "$interface_for_mac" | awk '/ether/ {print $2}')
+    current_mac=$(ip link show "$interface_for_mac" | awk '/ether/ {print $2}' || true)
     if [[ -z "$current_mac" ]]; then
         log "ERROR" "Could not determine MAC address for interface $interface_for_mac"
         return 1
     fi
     log "DEBUG" "current_mac: $current_mac"
     
-    # Get IPv6 address if available
-    current_ipv6=$(ip addr show "$SSH_INTERFACE" | grep "inet6.*global" | awk '{print $2}' | head -n1)
+    # Get IPv6 address if available  
+    log "DEBUG" "Getting IPv6 address"
+    current_ipv6=$(ip addr show "$SSH_INTERFACE" | grep "inet6.*global" | awk '{print $2}' | head -n1 || true)
+    log "DEBUG" "current_ipv6: ${current_ipv6:-none}"
     
     # Define private subnet for vmbr1 (pfSense compatible)
     local private_subnet="192.168.1.0/24"
     local private_ip="192.168.1.1/24"
     local first_ipv6=""
     if [[ -n "$current_ipv6" ]]; then
+        log "DEBUG" "Processing IPv6 configuration"
         # Generate first IPv6 CIDR similar to ariadata format
         local ipv6_prefix
-        ipv6_prefix=$(echo "$current_ipv6" | cut -d'/' -f1 | cut -d':' -f1-4)
-        first_ipv6="${ipv6_prefix}:1::1/80"
+        ipv6_prefix=$(echo "$current_ipv6" | cut -d'/' -f1 | cut -d':' -f1-4 || true)
+        if [[ -n "$ipv6_prefix" ]]; then
+            first_ipv6="${ipv6_prefix}:1::1/80"
+            log "DEBUG" "first_ipv6: $first_ipv6"
+        else
+            log "DEBUG" "Could not generate IPv6 prefix"
+        fi
     fi
     
     log "INFO" "Creating ariadata-compatible configuration with additional IPs:"
