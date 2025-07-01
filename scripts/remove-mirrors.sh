@@ -482,7 +482,12 @@ main() {
     log "INFO" "Next steps:"
     log "INFO" "1. Run: ./install.sh --setup-mirrors  # To reconfigure drives"
     log "INFO" "2. Verify: zpool list                 # Check final ZFS status"
+    
+    # Explicitly exit with success code
+    exit 0
 }
 
-# Run main if executed directly
-[[ "${BASH_SOURCE[0]}" == "${0}" ]] && main "$@"
+# Execute main function if script is run directly
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi
