@@ -1286,6 +1286,163 @@ EOF
     log "INFO" "  - vmbr0: WAN bridge (connected to $SSH_INTERFACE)"
     log "INFO" "  - vmbr1: LAN bridge (192.168.1.1/24)"
     log "INFO" "  - vmbr2: DMZ bridge (10.0.2.0/24)"
+    
+    # Configure Proxmox zones for network segmentation
+    configure_proxmox_zones
+}
+
+# Configure Proxmox zones for network segmentation
+configure_proxmox_zones() {
+    log "INFO" "Configuring Proxmox network zones..."
+    
+    # Create zones configuration directory if it doesn't exist
+    mkdir -p /etc/pve/sdn/zones
+    mkdir -p /etc/pve/sdn/vnets
+    mkdir -p /etc/pve/sdn/subnets
+    
+    # Configure WAN zone (vmbr0)
+    cat > /etc/pve/sdn/zones/wan.cfg << 'EOF'
+simple: wan
+bridge vmbr0
+nodes proxmox-01
+mtu 1500
+EOF
+    
+    # Configure LAN zone (vmbr1) 
+    cat > /etc/pve/sdn/zones/lan.cfg << 'EOF'
+simple: lan
+bridge vmbr1
+nodes proxmox-01
+mtu 1500
+EOF
+    
+    # Configure DMZ zone (vmbr2)
+    cat > /etc/pve/sdn/zones/dmz.cfg << 'EOF'
+simple: dmz
+bridge vmbr2
+nodes proxmox-01
+mtu 1500
+EOF
+    
+    # Create VNet configurations
+    cat > /etc/pve/sdn/vnets/lan-net.cfg << 'EOF'
+vnet: lan-net
+zone lan
+tag 100
+EOF
+    
+    cat > /etc/pve/sdn/vnets/dmz-net.cfg << 'EOF'
+vnet: dmz-net
+zone dmz
+tag 200
+EOF
+    
+    # Create subnet configurations
+    cat > /etc/pve/sdn/subnets/lan-subnet.cfg << 'EOF'
+subnet: lan-net-192.168.1.0/24
+vnet lan-net
+gateway 192.168.1.1
+snat 1
+dhcp-range 192.168.1.100,192.168.1.200
+EOF
+    
+    cat > /etc/pve/sdn/subnets/dmz-subnet.cfg << 'EOF'
+subnet: dmz-net-10.0.2.0/24
+vnet dmz-net
+gateway 10.0.2.1
+snat 1
+dhcp-range 10.0.2.100,10.0.2.200
+EOF
+    
+    # Apply SDN configuration if pvesh is available
+    if command -v pvesh >/dev/null 2>&1; then
+        log "INFO" "Applying Proxmox SDN configuration..."
+        pvesh set /cluster/sdn 2>/dev/null || {
+            log "WARN" "Could not apply SDN configuration automatically"
+            log "INFO" "You may need to apply it manually via Proxmox web interface: Datacenter → SDN"
+        }
+    else
+        log "INFO" "Proxmox SDN configuration files created"
+        log "INFO" "Apply via web interface: Datacenter → SDN → Apply"
+    fi
+    
+    log "INFO" "✓ Proxmox network zones configured"
+    log "INFO" "  - WAN zone: vmbr0 (external traffic)"
+    log "INFO" "  - LAN zone: vmbr1 (internal management)"
+    log "INFO" "  - DMZ zone: vmbr2 (public services)"
+    
+    # Configure basic firewall rules for network segmentation
+    configure_proxmox_firewall_rules
+}
+
+# Configure Proxmox firewall rules for network segmentation
+configure_proxmox_firewall_rules() {
+    log "INFO" "Configuring Proxmox firewall rules for network zones..."
+    
+    # Create firewall directory if it doesn't exist
+    mkdir -p /etc/pve/firewall
+    
+    # Configure cluster-wide firewall settings
+    cat > /etc/pve/firewall/cluster.fw << 'EOF'
+[OPTIONS]
+enable: 1
+policy_in: DROP
+policy_out: ACCEPT
+
+[ALIASES]
+lan_network 192.168.1.0/24
+dmz_network 10.0.2.0/24
+management_ip 192.168.1.1
+
+[RULES]
+# Allow management traffic
+IN ACCEPT -source +lan_network -dport 22,8006
+IN ACCEPT -source +management_ip
+
+# Allow DNS and NTP from internal networks
+IN ACCEPT -source +lan_network -dport 53,123
+IN ACCEPT -source +dmz_network -dport 53,123
+
+# Allow HTTP/HTTPS to DMZ
+IN ACCEPT -dport 80,443 -dest +dmz_network
+
+# Allow pfSense management
+IN ACCEPT -source +lan_network -dest +management_ip -dport 80,443
+
+# Drop everything else by default (policy_in: DROP)
+EOF
+    
+    # Create node-specific firewall configuration
+    local node_name
+    node_name=$(hostname)
+    
+    cat > "/etc/pve/nodes/$node_name/host.fw" << 'EOF'
+[OPTIONS]
+enable: 1
+nftables: 1
+
+[RULES]
+# Allow SSH from anywhere (be more restrictive in production)
+IN SSH(ACCEPT) -log nolog
+
+# Allow Proxmox web interface
+IN ACCEPT -dport 8006
+
+# Allow cluster communication
+IN ACCEPT -source 192.168.1.0/24 -dport 5404:5412
+IN ACCEPT -source 192.168.1.0/24 -dport 3128
+
+# Allow pfSense management access
+IN ACCEPT -source 192.168.1.0/24 -dport 80,443
+
+# ICMP
+IN ACCEPT -p icmp
+EOF
+    
+    log "INFO" "✓ Proxmox firewall rules configured"
+    log "INFO" "  - Cluster firewall enabled with network segmentation"
+    log "INFO" "  - DMZ traffic restricted to HTTP/HTTPS"
+    log "INFO" "  - LAN management access configured"
 }
 
 # Ensure network configuration is properly applied
@@ -1469,6 +1626,10 @@ ensure_network_configuration() {
     log "INFO" "📋 Container Network Configuration Examples:"
     log "INFO" "   LAN container: --net0 name=eth0,bridge=vmbr1,ip=192.168.1.100/24,gw=192.168.1.1"
     log "INFO" "   DMZ container: --net0 name=eth0,bridge=vmbr2,ip=10.0.2.10/24,gw=10.0.2.1"
+    log "INFO" ""
+    log "INFO" "🏗️ Proxmox Web Interface Access:"
+    log "INFO" "   Navigate to Datacenter → SDN to view/modify network zones"
+    log "INFO" "   Navigate to Firewall to view/modify security rules"
 }
 
 # Show current network status
@@ -1508,6 +1669,25 @@ show_network_status() {
         log "INFO" "  ✓ NAT rules configured"
     else
         log "WARN" "  ✗ NAT rules missing"
+    fi
+    
+    log "INFO" "=== Proxmox Zones ==="
+    if [[ -f /etc/pve/sdn/zones/dmz.cfg ]]; then
+        log "INFO" "  ✓ DMZ zone configured"
+    else
+        log "WARN" "  ✗ DMZ zone not configured"
+    fi
+    
+    if [[ -f /etc/pve/sdn/zones/lan.cfg ]]; then
+        log "INFO" "  ✓ LAN zone configured"
+    else
+        log "WARN" "  ✗ LAN zone not configured"
+    fi
+    
+    if [[ -f /etc/pve/firewall/cluster.fw ]]; then
+        log "INFO" "  ✓ Cluster firewall configured"
+    else
+        log "WARN" "  ✗ Cluster firewall not configured"
     fi
 }
 

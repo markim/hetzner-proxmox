@@ -40,6 +40,9 @@ ensure_network_bridges() {
         }
     fi
     
+    # Configure Proxmox zones for network segmentation
+    configure_proxmox_zones_for_pfsense
+    
     # Ensure vmbr1 exists and is configured
     if ! ip link show vmbr1 >/dev/null 2>&1; then
         log "ERROR" "vmbr1 bridge still not found after network configuration"
@@ -70,6 +73,168 @@ ensure_network_bridges() {
     fi
     
     log "INFO" "✓ All network bridges are properly configured"
+}
+
+# Configure Proxmox zones for pfSense integration
+configure_proxmox_zones_for_pfsense() {
+    log "INFO" "Configuring Proxmox zones for pfSense integration..."
+    
+    # Create zones configuration directory if it doesn't exist
+    mkdir -p /etc/pve/sdn/zones 2>/dev/null || true
+    mkdir -p /etc/pve/sdn/vnets 2>/dev/null || true
+    mkdir -p /etc/pve/sdn/subnets 2>/dev/null || true
+    
+    # Get the actual node name
+    local node_name
+    node_name=$(hostname)
+    
+    # Configure WAN zone (vmbr0)
+    cat > /etc/pve/sdn/zones/wan.cfg << EOF
+simple: wan
+bridge vmbr0
+nodes $node_name
+mtu 1500
+EOF
+    
+    # Configure LAN zone (vmbr1) 
+    cat > /etc/pve/sdn/zones/lan.cfg << EOF
+simple: lan
+bridge vmbr1
+nodes $node_name
+mtu 1500
+EOF
+    
+    # Configure DMZ zone (vmbr2)
+    cat > /etc/pve/sdn/zones/dmz.cfg << EOF
+simple: dmz
+bridge vmbr2
+nodes $node_name
+mtu 1500
+EOF
+    
+    # Create VNet configurations for LAN
+    cat > /etc/pve/sdn/vnets/lan-net.cfg << 'EOF'
+vnet: lan-net
+zone lan
+tag 100
+EOF
+    
+    # Create VNet configurations for DMZ
+    cat > /etc/pve/sdn/vnets/dmz-net.cfg << 'EOF'
+vnet: dmz-net
+zone dmz
+tag 200
+EOF
+    
+    # Create subnet configurations for LAN
+    cat > /etc/pve/sdn/subnets/lan-subnet.cfg << 'EOF'
+subnet: lan-net-192.168.1.0/24
+vnet lan-net
+gateway 192.168.1.1
+snat 1
+dhcp-range 192.168.1.100,192.168.1.200
+EOF
+    
+    # Create subnet configurations for DMZ
+    cat > /etc/pve/sdn/subnets/dmz-subnet.cfg << 'EOF'
+subnet: dmz-net-10.0.2.0/24
+vnet dmz-net
+gateway 10.0.2.1
+snat 1
+dhcp-range 10.0.2.100,10.0.2.200
+EOF
+    
+    # Configure Proxmox firewall for pfSense zones
+    mkdir -p /etc/pve/firewall 2>/dev/null || true
+    
+    # Configure cluster-wide firewall settings
+    cat > /etc/pve/firewall/cluster.fw << 'EOF'
+[OPTIONS]
+enable: 1
+policy_in: DROP
+policy_out: ACCEPT
+
+[ALIASES]
+lan_network 192.168.1.0/24
+dmz_network 10.0.2.0/24
+pfsense_lan 192.168.1.1
+pfsense_dmz 10.0.2.1
+
+[RULES]
+# Allow pfSense management from LAN
+IN ACCEPT -source +lan_network -dest +pfsense_lan -dport 80,443
+
+# Allow DNS and NTP to pfSense
+IN ACCEPT -source +lan_network -dest +pfsense_lan -dport 53,123
+IN ACCEPT -source +dmz_network -dest +pfsense_dmz -dport 53,123
+
+# Allow SSH to Proxmox from LAN
+IN SSH(ACCEPT) -source +lan_network
+
+# Allow Proxmox web interface from LAN
+IN ACCEPT -source +lan_network -dport 8006
+
+# Allow HTTP/HTTPS to DMZ from anywhere
+IN ACCEPT -dport 80,443 -dest +dmz_network
+
+# Allow ICMP
+IN ACCEPT -p icmp
+
+# Default DROP policy handles the rest
+EOF
+    
+    # Create node-specific firewall configuration
+    cat > "/etc/pve/nodes/$node_name/host.fw" << 'EOF'
+[OPTIONS]
+enable: 1
+nftables: 1
+
+[RULES]
+# Allow SSH from LAN
+IN SSH(ACCEPT) -source 192.168.1.0/24
+
+# Allow Proxmox web interface from LAN
+IN ACCEPT -source 192.168.1.0/24 -dport 8006
+
+# Allow cluster communication
+IN ACCEPT -source 192.168.1.0/24 -dport 5404:5412
+IN ACCEPT -source 192.168.1.0/24 -dport 3128
+
+# Allow pfSense traffic
+IN ACCEPT -source 192.168.1.1
+IN ACCEPT -source 10.0.2.1
+
+# ICMP
+IN ACCEPT -p icmp
+EOF
+    
+    # Apply SDN configuration if possible
+    if command -v pvesh >/dev/null 2>&1; then
+        log "INFO" "Applying Proxmox SDN configuration..."
+        # Reload the PVE configuration
+        systemctl reload-or-restart pvedaemon 2>/dev/null || true
+        systemctl reload-or-restart pveproxy 2>/dev/null || true
+        
+        # Apply SDN configuration
+        pvesh set /cluster/sdn 2>/dev/null || {
+            log "WARN" "Could not apply SDN configuration automatically"
+            log "INFO" "Apply manually via Proxmox web interface: Datacenter → SDN → Apply"
+        }
+    fi
+    
+    # Reload firewall configuration
+    if command -v pve-firewall >/dev/null 2>&1; then
+        log "INFO" "Reloading Proxmox firewall configuration..."
+        pve-firewall restart 2>/dev/null || {
+            log "WARN" "Could not restart firewall automatically"
+        }
+    fi
+    
+    log "INFO" "✓ Proxmox zones configured for pfSense:"
+    log "INFO" "  - WAN zone: vmbr0 (external/internet traffic)"
+    log "INFO" "  - LAN zone: vmbr1 (internal management - 192.168.1.0/24)"
+    log "INFO" "  - DMZ zone: vmbr2 (public services - 10.0.2.0/24)"
+    log "INFO" "  - Firewall rules configured for network segmentation"
 }
 
 # Validate prerequisites
@@ -350,7 +515,21 @@ show_management_commands() {
     echo "• Interface assignment: WAN=vtnet0, LAN=vtnet1, DMZ=vtnet2"
     echo "• WAN requires correct MAC address for Hetzner routing"
     echo "• LAN devices will connect to vmbr1 bridge"
-    echo "• DMZ devices will connect to vmbr2 bridge (if configured)"
+    echo "• DMZ devices will connect to vmbr2 bridge"
+    echo
+    echo "=== 🏗️ PROXMOX ZONES CONFIGURED ==="
+    echo "WAN Zone:           vmbr0 (external/internet traffic)"
+    echo "LAN Zone:           vmbr1 (internal management network)"
+    echo "DMZ Zone:           vmbr2 (public-facing services)"
+    echo "Firewall:           Configured with network segmentation"
+    echo "SDN Configuration:  Available in Datacenter → SDN"
+    echo
+    echo "=== 📋 CONTAINER EXAMPLES ==="
+    echo "LAN Container:      pct create 300 template.tar.zst \\"
+    echo "                      --net0 name=eth0,bridge=vmbr1,ip=192.168.1.100/24,gw=192.168.1.1"
+    echo
+    echo "DMZ Container:      pct create 301 template.tar.zst \\"
+    echo "                      --net0 name=eth0,bridge=vmbr2,ip=10.0.2.10/24,gw=10.0.2.1"
     echo
 }
 
@@ -474,6 +653,22 @@ main() {
     show_management_commands
     
     log "INFO" "pfSense VM setup completed successfully!"
+    log "INFO" ""
+    log "INFO" "🏗️ Network Architecture Summary:"
+    log "INFO" "================================="
+    log "INFO" "Internet → vmbr0 (WAN) → pfSense VM → vmbr1 (LAN) / vmbr2 (DMZ)"
+    log "INFO" ""
+    log "INFO" "📊 Proxmox Configuration Status:"
+    if [[ -f /etc/pve/sdn/zones/dmz.cfg ]]; then
+        log "INFO" "  ✓ DMZ zone configured in Proxmox"
+    else
+        log "WARN" "  ✗ DMZ zone configuration missing"
+    fi
+    if [[ -f /etc/pve/firewall/cluster.fw ]]; then
+        log "INFO" "  ✓ Firewall rules configured"
+    else
+        log "WARN" "  ✗ Firewall configuration missing"
+    fi
     log "INFO" ""
     log "INFO" "Next steps:"
     log "INFO" "1. Start the VM: qm start $PFSENSE_VM_ID"
