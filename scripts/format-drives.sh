@@ -294,8 +294,7 @@ format_drive() {
     
     # Check for and unmount any partitions of this drive
     log "INFO" "Checking for existing partitions to unmount..."
-    # shellcheck disable=SC2231
-    for partition in /dev/${drive}*; do
+    for partition in "/dev/${drive}"*; do
         if [[ -b "$partition" && "$partition" != "/dev/$drive" ]]; then
             local part_mount
             part_mount=$(findmnt -n -o TARGET "$partition" 2>/dev/null || true)

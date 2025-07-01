@@ -46,7 +46,7 @@ OPTIONS:
 EXAMPLES:
     $0                          # Show available commands (safe - shows help only)
     $0 --check-mac              # Verify MAC address configuration (recommended first step)
-    $0 --setup-system           # Optimize host system for Proxmox and setup /var/lib/vz partition
+    $0 --setup-system           # Optimize host system and zfs for Proxmox
     $0 --format-drives          # Format non-system drives interactively
     $0 --setup-mirrors          # Scan drives and configure optimal RAID mirror arrays
     $0 --remove-mirrors         # Remove ALL RAID mirror configurations including system mirrors
@@ -58,11 +58,13 @@ EXAMPLES:
 
 RECOMMENDED WORKFLOW:
     1. $0 --check-mac           # Verify MAC addresses are correct
-    2. $0 --format-drives       # (Optional) Format any drives that need clean state
-    3. $0 --network             # Apply network configuration
-    5. $0 --caddy               # Install Caddy reverse proxy
+    2. $0 --setup-system        # Verify MAC addresses are correct
+    3. $0 --format-drives       # (Optional) Format any drives that need clean state
+    4. $0 --setup-mirrors       # Apply network configuration
+    5. $0 --network             # Configure network interfaces for additional IPs
     6. $0 --pfsense             # (Optional) Create pfSense firewall
     7. $0 --firewalladmin       # (Optional) Create admin VM for pfSense
+    8. $0 --caddy               # Install Caddy reverse proxy
 
 REQUIREMENTS:
     - Fresh Proxmox installation on Hetzner server
@@ -77,9 +79,8 @@ NETWORK SETUP:
     See .env.example for configuration examples.
 
 SAFETY NOTES:
-    - Network configuration includes automatic backup and restore capabilities
     - SSH connectivity is preserved during network changes
-    - Emergency restore script is created: /root/restore-network.sh
+    - System mirrors are preserved during RAID setup
 
 EOF
 }

@@ -4,7 +4,6 @@
 # This script removes ZFS pools and cleans up Proxmox storage configurations
 # Focuses on ZFS-only removal, replacing legacy RAID functionality
 
-# shellcheck disable=SC2317 # Disable "unreachable code" for error handler
 # Note: We intentionally don't use 'set -e' here to handle errors gracefully
 set -uo pipefail
 
