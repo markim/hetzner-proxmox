@@ -56,7 +56,7 @@ Automated setup scripts for configuring a Hetzner server with Proxmox, pfSense f
 | `./install.sh --caddy` | Install Caddy reverse proxy with HTTPS |
 | `./install.sh --network` | Configure network bridges for additional IPs |
 | `./install.sh --pfsense` | Create pfSense firewall VM |
-| `./install.sh --firewalladmin` | Create Fedora container for pfSense admin access |
+| `./install.sh --firewalladmin` | Create Puppy linux container for pfSense admin access |
 
 ## 🏗️ What This Creates
 
@@ -66,43 +66,6 @@ Internet → Additional IPs → vmbr0 (WAN) → pfSense → vmbr1 (LAN) / vmbr2 
                                               ↓
                                         VMs/Containers
 ```
-
-### Components
-
-**Drive Preparation** (Optional)
-- Interactive drive and RAID configuration with multiple options
-- Safety checks and confirmations before making any changes
-- Supports any drive combination and sizes with user choice
-- Creates backups and emergency restore information
-- Scan-only mode to preview configurations without changes
-
-**Caddy Reverse Proxy**
-- HTTPS termination with automatic Let's Encrypt certificates
-- Secures Proxmox behind your custom domain
-- Proper logging and monitoring setup
-
-**Network Configuration**
-- Configures additional Hetzner IPs with proper MAC addresses
-- Creates network bridges (vmbr0=WAN, vmbr1=LAN, vmbr2=DMZ)
-- Preserves SSH connectivity during changes
-- Emergency rollback scripts
-
-**pfSense Firewall VM**
-- Router/firewall VM with dual network interfaces
-- Separates internet traffic from internal network
-- Professional-grade firewall and routing capabilities
-
-**Firewall Admin Container**
-- Puppy linux container with desktop environment and Firefox
-- Secure access to pfSense web interface
-- Network troubleshooting tools included
-
-## 📋 Prerequisites
-
-- **Hetzner Server**: Fresh Proxmox installation via Hetzner installimage
-- **Domain**: Domain name pointing to your server's main IP
-- **Additional IPs**: Additional IP addresses from Hetzner with their MAC addresses
-- **Access**: Root SSH access to the server
 
 ## ⚙️ Configuration
 
@@ -121,6 +84,8 @@ ADDITIONAL_NETMASK_1=255.255.255.192
 
 ADDITIONAL_IP_2=203.0.113.11
 ADDITIONAL_MAC_2=00:50:56:00:01:03
+ADDITIONAL_GATEWAY_2=203.0.113.1
+ADDITIONAL_NETMASK_2=255.255.255.192
 # ... continue for each additional IP
 ```
 
@@ -134,23 +99,6 @@ IP=203.0.113.11 MAC=00:50:56:00:01:03 GATEWAY=203.0.113.1 NETMASK=255.255.255.19
 ```
 
 **⚠️ Critical**: MAC addresses are mandatory! Get them from your Hetzner control panel.
-
-## 🔒 Security Features
-
-- **HTTPS Everywhere**: All traffic encrypted with automatic SSL certificates
-- **Firewall Protection**: pfSense isolates and protects internal network
-- **Secure Admin Access**: Dedicated container for firewall management
-- **Network Isolation**: Proper VLAN separation between WAN/LAN/DMZ
-- **SSH Preservation**: Network changes preserve SSH connectivity
-
-## 🛡️ Safety Features
-
-- **Interactive Drive Setup**: User confirms all drive operations with detailed previews
-- **Multiple Safety Checks**: Verifies system state before making destructive changes
-- **Emergency Restore Info**: Creates detailed backup information before any changes
-- **Scan-Only Mode**: Preview drive configurations without making any changes
-- **Force Confirmation**: Requires explicit confirmation for destructive operations
-- **Automatic Rollback**: Network changes include automatic restore capabilities
 
 ## 🐛 Getting Help
 

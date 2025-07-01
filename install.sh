@@ -411,21 +411,8 @@ run_caddy_setup() {
         exit 1
     fi
     
-    log "INFO" "✅ Caddy Setup Complete!"
     log "INFO" "Caddy is now installed, configured, and running"
-    log "INFO" ""
     log "INFO" "You should now be able to access Proxmox at: https://$DOMAIN"
-    log "INFO" ""
-    log "INFO" "If HTTPS is not working yet:"
-    log "INFO" "1. Ensure your domain DNS points to this server's IP"
-    log "INFO" "2. Check that ports 80 and 443 are open"
-    log "INFO" "3. Monitor Caddy logs: journalctl -u caddy -f"
-    log "INFO" "4. Check Caddy access logs: tail -f $CADDY_LOG_FILE"
-    log "INFO" ""
-    log "INFO" "Important Notes:"
-    log "INFO" "- SSL certificates are automatically managed by Caddy"
-    log "INFO" "- Ensure your firewall allows traffic on ports 80 and 443"
-    log "INFO" ""
     log "INFO" "Logs are available at: $LOG_FILE"
 }
 
