@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# Hetzner Proxmox Drive Formatting Script
-# This script helps format non-system drives safely with user confirmation
+# Hetzner Proxmox Drive Formatting Script (ZFS)
+# This script helps format non-system drives safely with ZFS
 
 set -euo pipefail
 
@@ -223,6 +223,20 @@ show_drive_usage() {
         echo "    No partitions found"
     fi
     
+    # Check if used in ZFS pools
+    if command -v zpool >/dev/null 2>&1; then
+        local zfs_usage
+        zfs_usage=$(zpool status 2>/dev/null | grep -B5 -A5 "/dev/$drive" | grep "pool:" | awk '{print $2}' || true)
+        if [[ -n "$zfs_usage" ]]; then
+            echo "  ZFS pool usage:"
+            while IFS= read -r pool_line; do
+                if [[ -n "$pool_line" ]]; then
+                    echo "    Pool: $pool_line"
+                fi
+            done <<< "$zfs_usage"
+        fi
+    fi
+    
     # Check if used in RAID
     if [[ -f /proc/mdstat ]]; then
         local raid_usage
@@ -238,18 +252,28 @@ show_drive_usage() {
     fi
 }
 
-# Function to format a drive
+# Function to format a drive for ZFS
 format_drive() {
     local drive="$1"
-    local filesystem="${2:-ext4}"
-    local label="$3"
+    local pool_name="${2:-storage}"
     
-    log "INFO" "Formatting drive /dev/$drive with $filesystem filesystem..."
+    log "INFO" "Preparing drive /dev/$drive for ZFS pool '$pool_name'..."
     
     # Verify drive exists
     if [[ ! -b "/dev/$drive" ]]; then
         log "ERROR" "Drive /dev/$drive does not exist"
         return 1
+    fi
+    
+    # Check if drive is already part of a ZFS pool
+    if command -v zpool >/dev/null 2>&1; then
+        local existing_pool
+        existing_pool=$(zpool status 2>/dev/null | grep -B5 -A5 "/dev/$drive" | grep "pool:" | awk '{print $2}' || true)
+        if [[ -n "$existing_pool" ]]; then
+            log "ERROR" "Drive /dev/$drive is already part of ZFS pool: $existing_pool"
+            log "ERROR" "Use './scripts/remove-mirrors.sh' to remove from existing pools first"
+            return 1
+        fi
     fi
     
     # Unmount any mounted partitions first
@@ -290,7 +314,7 @@ format_drive() {
             log "ERROR" "Drive /dev/$drive appears to be part of RAID arrays:"
             echo "$raid_usage"
             log "ERROR" "Cannot format drive that is part of active RAID arrays"
-            log "ERROR" "Please remove from RAID first using: ./install.sh --remove-mirrors"
+            log "ERROR" "Please remove from RAID first using: ./scripts/remove-mirrors.sh"
             return 1
         fi
     fi
@@ -298,24 +322,36 @@ format_drive() {
     # Wait a moment for unmounts to complete
     sleep 1
     
+    # Clear any existing ZFS labels
+    log "INFO" "Clearing existing ZFS labels..."
+    if command -v zpool >/dev/null 2>&1; then
+        zpool labelclear -f "/dev/$drive" 2>/dev/null || true
+    fi
+    
     # Wipe any existing filesystem signatures
     log "INFO" "Wiping existing filesystem signatures..."
     if ! wipefs -a "/dev/$drive" 2>/dev/null; then
         log "WARNING" "Failed to wipe signatures, continuing anyway"
     fi
     
-    # Create new partition table
+    # Create new GPT partition table
     log "INFO" "Creating new GPT partition table..."
     if ! parted "/dev/$drive" --script mklabel gpt 2>/dev/null; then
         log "ERROR" "Failed to create partition table on /dev/$drive"
         return 1
     fi
     
-    # Create partition using all available space
-    log "INFO" "Creating partition..."
+    # Create partition using all available space for ZFS
+    log "INFO" "Creating ZFS partition..."
     if ! parted "/dev/$drive" --script mkpart primary 0% 100% 2>/dev/null; then
         log "ERROR" "Failed to create partition on /dev/$drive"
         return 1
+    fi
+    
+    # Set partition type to ZFS (Solaris root)
+    log "INFO" "Setting partition type to ZFS..."
+    if ! parted "/dev/$drive" --script set 1 type 6a945a3b-1dd2-11b2-99a6-080020736631 2>/dev/null; then
+        log "WARNING" "Failed to set ZFS partition type, continuing anyway"
     fi
     
     # Wait for partition to be created and inform kernel
@@ -344,46 +380,8 @@ format_drive() {
         return 1
     fi
     
-    # Format the partition
-    log "INFO" "Creating $filesystem filesystem on $partition_device..."
-    case "$filesystem" in
-        ext4)
-            local mkfs_args=(-F)
-            if [[ -n "$label" ]]; then
-                mkfs_args+=(-L "$label")
-            fi
-            if ! mkfs.ext4 "${mkfs_args[@]}" "$partition_device" 2>/dev/null; then
-                log "ERROR" "Failed to format $partition_device with ext4"
-                return 1
-            fi
-            ;;
-        xfs)
-            local mkfs_args=(-f)
-            if [[ -n "$label" ]]; then
-                mkfs_args+=(-L "$label")
-            fi
-            if ! mkfs.xfs "${mkfs_args[@]}" "$partition_device" 2>/dev/null; then
-                log "ERROR" "Failed to format $partition_device with xfs"
-                return 1
-            fi
-            ;;
-        btrfs)
-            local mkfs_args=(-f)
-            if [[ -n "$label" ]]; then
-                mkfs_args+=(-L "$label")
-            fi
-            if ! mkfs.btrfs "${mkfs_args[@]}" "$partition_device" 2>/dev/null; then
-                log "ERROR" "Failed to format $partition_device with btrfs"
-                return 1
-            fi
-            ;;
-        *)
-            log "ERROR" "Unsupported filesystem: $filesystem"
-            return 1
-            ;;
-    esac
-    
-    log "INFO" "Successfully formatted /dev/$drive as $filesystem"
+    log "INFO" "Successfully prepared /dev/$drive for ZFS"
+    log "INFO" "Partition ready: $partition_device"
     
     # Show the result
     log "INFO" "New partition information:"
@@ -406,25 +404,27 @@ main() {
                 cat << EOF
 Usage: $0 [OPTIONS]
 
-Format non-system drives safely with user confirmation.
+Prepare non-system drives for ZFS pools with user confirmation.
 
 OPTIONS:
     --help      Show this help message
 
 EXAMPLES:
-    $0                  # Interactive drive formatting
+    $0                  # Interactive ZFS drive preparation
 
 SAFETY:
     - Automatically detects and protects system drives
-    - Shows drive information before formatting
+    - Shows drive information before preparation
     - Requires explicit confirmation for each drive
-    - Supports multiple filesystem types (ext4, xfs, btrfs)
-    - Unmounts drives and removes RAID associations
+    - Prepares drives for ZFS pool creation
+    - Unmounts drives and removes RAID/ZFS associations
 
-FILESYSTEM SUPPORT:
-    - ext4 (default, recommended for most use cases)
-    - xfs (good for large files and high performance)
-    - btrfs (advanced features, snapshots, compression)
+ZFS FEATURES:
+    - Enterprise-grade filesystem with data integrity
+    - Built-in compression and deduplication
+    - Snapshots and cloning capabilities
+    - RAID-Z redundancy options
+    - Self-healing and error detection
 
 EOF
                 exit 0
@@ -444,7 +444,12 @@ EOF
     
     # Check for required tools
     local missing_tools=()
-    local required_tools=("lsblk" "findmnt" "wipefs" "mkfs.ext4" "blkid")
+    local required_tools=("lsblk" "findmnt" "wipefs" "parted" "blkid")
+    
+    # Check for ZFS tools
+    if ! command -v zpool >/dev/null 2>&1; then
+        missing_tools+=("zfs-utils")
+    fi
     
     for tool in "${required_tools[@]}"; do
         if ! command -v "$tool" >/dev/null 2>&1; then
@@ -455,12 +460,12 @@ EOF
     if [[ ${#missing_tools[@]} -gt 0 ]]; then
         log "ERROR" "Missing required tools: ${missing_tools[*]}"
         log "ERROR" "Please install the missing packages:"
-        log "ERROR" "  apt update && apt install -y util-linux e2fsprogs"
+        log "ERROR" "  apt update && apt install -y util-linux parted zfsutils-linux"
         exit 1
     fi
     
-    log "INFO" "Starting drive formatting process..."
-    log "INFO" "This script will help you safely format non-system drives"
+    log "INFO" "Starting ZFS drive preparation process..."
+    log "INFO" "This script will help you safely prepare non-system drives for ZFS"
     echo
     
     # Detect system drives
@@ -503,15 +508,15 @@ EOF
     
     if [[ ${#available_drives[@]} -eq 0 ]]; then
         echo
-        log "INFO" "ℹ️  No non-system drives available for formatting"
+        log "INFO" "ℹ️  No non-system drives available for ZFS preparation"
         log "INFO" ""
         log "INFO" "All detected drives are currently:"
         log "INFO" "  • System drives (used for OS/boot)"
         log "INFO" "  • Already mounted with active data"
-        log "INFO" "  • Part of RAID arrays"
+        log "INFO" "  • Part of RAID arrays or ZFS pools"
         log "INFO" ""
-        log "INFO" "If you need to format system drives or RAID members:"
-        log "INFO" "  • Remove RAID arrays first: ./install.sh --remove-mirrors"
+        log "INFO" "If you need to prepare system drives or remove existing pools:"
+        log "INFO" "  • Remove ZFS pools first: ./scripts/remove-mirrors.sh"
         log "INFO" "  • Use manual tools with extreme caution"
         log "INFO" ""
         log "INFO" "Current system drives:"
@@ -523,7 +528,7 @@ EOF
         exit 0
     fi
     
-    log "INFO" "Available drives for formatting:"
+    log "INFO" "Available drives for ZFS preparation:"
     for i in "${!available_drives[@]}"; do
         local drive="${available_drives[$i]}"
         local drive_info
@@ -534,21 +539,21 @@ EOF
     done
     
     echo
-    log "WARNING" "⚠️  FORMATTING WILL PERMANENTLY DELETE ALL DATA ON SELECTED DRIVES!"
+    log "WARNING" "⚠️  PREPARING DRIVES WILL WIPE ALL DATA AND PREPARE FOR ZFS!"
     echo
     
     # Drive selection loop
     while true; do
-        echo "Select drives to format:"
+        echo "Select drives to prepare for ZFS:"
         echo "  📝 Enter drive numbers separated by spaces (e.g., '1 3 4' for drives 1, 3, and 4)"
-        echo "  📝 Enter 'all' to format all available drives"
-        echo "  📝 Enter 'quit' or 'exit' to cancel without formatting"
+        echo "  📝 Enter 'all' to prepare all available drives"
+        echo "  📝 Enter 'quit' or 'exit' to cancel without preparing"
         echo "  📝 Valid range: 1-${#available_drives[@]}"
         echo
         read -p "Your selection: " -r selection
         
         if [[ "$selection" == "quit" ]] || [[ "$selection" == "exit" ]] || [[ "$selection" == "q" ]]; then
-            log "INFO" "Exiting without formatting any drives"
+            log "INFO" "Exiting without preparing any drives for ZFS"
             exit 0
         fi
         
@@ -599,7 +604,7 @@ EOF
         
         # Show selected drives
         echo
-        log "INFO" "Selected drives for formatting:"
+        log "INFO" "Selected drives for ZFS preparation:"
         for drive in "${drives_to_format[@]}"; do
             local drive_info
             drive_info=$(get_drive_info "$drive")
@@ -609,7 +614,7 @@ EOF
         echo
         log "WARNING" "⚠️  This will PERMANENTLY DELETE ALL DATA on ${#drives_to_format[@]} drive(s)!"
         echo
-        log "WARNING" "📋 Drives to be formatted:"
+        log "WARNING" "📋 Drives to be prepared for ZFS:"
         for drive in "${drives_to_format[@]}"; do
             local drive_info
             drive_info=$(get_drive_info "$drive")
@@ -618,75 +623,39 @@ EOF
         echo
         log "WARNING" "❗ This action cannot be undone!"
         echo
-        read -p "⚠️  Type 'yes' to proceed with formatting these ${#drives_to_format[@]} drive(s): " -r confirm_format
+        read -p "⚠️  Type 'yes' to proceed with preparing these ${#drives_to_format[@]} drive(s) for ZFS: " -r confirm_format
         if [[ "$confirm_format" != "yes" ]]; then
             log "INFO" "Operation cancelled (you must type exactly 'yes' to proceed)"
             continue
         fi
         
-        # Filesystem selection
+        # Pool name selection
         echo
-        echo "Select filesystem type:"
-        echo "  1. ext4 (recommended for most use cases)"
-        echo "  2. xfs (good for large files and high performance)"
-        echo "  3. btrfs (advanced features, snapshots, compression)"
-        echo
-        
-        local filesystem="ext4"
+        local pool_name="storage"
         while true; do
-            read -p "Filesystem choice (1-3, default: 1): " -r fs_choice
-            case "$fs_choice" in
-                ""|1) 
-                    filesystem="ext4"
-                    break
-                    ;;
-                2) 
-                    filesystem="xfs"
-                    break
-                    ;;
-                3) 
-                    filesystem="btrfs"
-                    break
-                    ;;
-                *) 
-                    log "ERROR" "Invalid choice '$fs_choice'. Please enter 1, 2, or 3."
-                    ;;
-            esac
-        done
-        
-        log "INFO" "Selected filesystem: $filesystem"
-        
-        # Optional label
-        echo
-        while true; do
-            read -p "Enter optional label for drives (leave empty for no label): " -r label
-            
-            # Validate label if provided
-            if [[ -n "$label" ]]; then
-                # Check for valid filesystem label characters (avoid special characters)
-                if [[ "$label" =~ ^[a-zA-Z0-9_-]+$ ]]; then
-                    if [[ ${#label} -le 16 ]]; then
-                        log "INFO" "Using label: $label"
-                        break
-                    else
-                        log "ERROR" "Label too long (max 16 characters). Please enter a shorter label."
-                    fi
-                else
-                    log "ERROR" "Invalid label. Use only letters, numbers, hyphens, and underscores."
-                fi
-            else
-                log "INFO" "No label will be applied"
+            read -p "Enter ZFS pool name (default: storage): " -r pool_input
+            if [[ -z "$pool_input" ]]; then
+                pool_name="storage"
                 break
+            elif [[ "$pool_input" =~ ^[a-zA-Z0-9_-]+$ ]] && [[ ${#pool_input} -le 32 ]]; then
+                # Check if pool already exists
+                if command -v zpool >/dev/null 2>&1 && zpool list "$pool_input" >/dev/null 2>&1; then
+                    log "ERROR" "ZFS pool '$pool_input' already exists. Choose a different name."
+                    continue
+                fi
+                pool_name="$pool_input"
+                break
+            else
+                log "ERROR" "Invalid pool name. Use only letters, numbers, hyphens, and underscores (max 32 chars)."
             fi
         done
         
-        # Format drives
+        log "INFO" "Using ZFS pool name: $pool_name"
+        
+        # Prepare drives
         echo
-        log "INFO" "🚀 Starting formatting process for ${#drives_to_format[@]} drive(s)..."
-        log "INFO" "Filesystem: $filesystem"
-        if [[ -n "$label" ]]; then
-            log "INFO" "Label: $label"
-        fi
+        log "INFO" "🚀 Starting ZFS drive preparation for ${#drives_to_format[@]} drive(s)..."
+        log "INFO" "Pool name: $pool_name"
         echo
         
         local success_count=0
@@ -698,18 +667,18 @@ EOF
         
         for drive in "${drives_to_format[@]}"; do
             echo
-            log "INFO" "📀 [$drive_counter/${#drives_to_format[@]}] Formatting /dev/$drive..."
-            log "DEBUG" "About to format drive: $drive"
+            log "INFO" "📀 [$drive_counter/${#drives_to_format[@]}] Preparing /dev/$drive for ZFS..."
+            log "DEBUG" "About to prepare drive: $drive"
             
             # Format the drive
-            if format_drive "$drive" "$filesystem" "$label"; then
+            if format_drive "$drive" "$pool_name"; then
                 success_count=$((success_count + 1))
-                log "INFO" "✅ [$drive_counter/${#drives_to_format[@]}] Successfully formatted /dev/$drive"
-                log "DEBUG" "Drive $drive formatting completed successfully"
+                log "INFO" "✅ [$drive_counter/${#drives_to_format[@]}] Successfully prepared /dev/$drive for ZFS"
+                log "DEBUG" "Drive $drive preparation completed successfully"
             else
                 failed_drives+=("$drive")
-                log "ERROR" "❌ [$drive_counter/${#drives_to_format[@]}] Failed to format /dev/$drive"
-                log "DEBUG" "Drive $drive formatting failed"
+                log "ERROR" "❌ [$drive_counter/${#drives_to_format[@]}] Failed to prepare /dev/$drive for ZFS"
+                log "DEBUG" "Drive $drive preparation failed"
             fi
             
             drive_counter=$((drive_counter + 1))
@@ -722,17 +691,18 @@ EOF
         log "DEBUG" "All drives processed, success_count: $success_count, failed: ${#failed_drives[@]}"
         
         echo
-        log "INFO" "Formatting completed!"
-        log "INFO" "Successfully formatted: $success_count of ${#drives_to_format[@]} drives"
+        log "INFO" "Drive preparation completed!"
+        log "INFO" "Successfully prepared: $success_count of ${#drives_to_format[@]} drives"
         
         if [[ ${#failed_drives[@]} -gt 0 ]]; then
-            log "WARNING" "Failed to format the following drives:"
+            log "WARNING" "Failed to prepare the following drives:"
             for failed_drive in "${failed_drives[@]}"; do
                 log "WARNING" "  - /dev/$failed_drive"
             done
             echo
-            log "INFO" "Common reasons for formatting failures:"
-            log "INFO" "  - Drive is part of an active RAID array (use --remove-mirrors first)"
+            log "INFO" "Common reasons for preparation failures:"
+            log "INFO" "  - Drive is part of an active ZFS pool (use remove-mirrors.sh first)"
+            log "INFO" "  - Drive is part of an active RAID array (use remove-mirrors.sh first)"
             log "INFO" "  - Drive is mounted and cannot be unmounted"
             log "INFO" "  - Drive has hardware issues"
             log "INFO" "  - Insufficient permissions"
@@ -761,9 +731,9 @@ EOF
         # Show summary of successful operations
         if [[ $success_count -gt 0 ]]; then
             echo
-            log "INFO" "📈 Summary of successfully formatted drives:"
+            log "INFO" "📈 Summary of successfully prepared drives:"
             for drive in "${drives_to_format[@]}"; do
-                # Check if this drive was successfully formatted
+                # Check if this drive was successfully prepared
                 local was_successful=true
                 for failed_drive in "${failed_drives[@]}"; do
                     if [[ "$drive" == "$failed_drive" ]]; then
@@ -775,10 +745,8 @@ EOF
                 if $was_successful; then
                     local drive_info
                     drive_info=$(get_drive_info "$drive" 2>/dev/null || echo "info unavailable")
-                    log "INFO" "  ✅ /dev/$drive - $filesystem filesystem"
-                    if [[ -n "$label" ]]; then
-                        log "INFO" "     Label: $label"
-                    fi
+                    log "INFO" "  ✅ /dev/$drive - Ready for ZFS"
+                    log "INFO" "     Pool name: $pool_name"
                 fi
             done
         fi
@@ -787,10 +755,10 @@ EOF
     done
     
     echo
-    log "INFO" "✅ Drive formatting process completed!"
+    log "INFO" "✅ ZFS drive preparation completed!"
     log "INFO" ""
     log "INFO" "Next steps:"
-    log "INFO" "1. Create RAID mirrors: ./install.sh --setup-mirrors"
+    log "INFO" "1. Create ZFS pools/mirrors: ./scripts/setup-mirrors.sh"
     log "INFO" "2. Configure network: ./install.sh --network"
     log "INFO" "3. Install Caddy: ./install.sh --caddy"
     
