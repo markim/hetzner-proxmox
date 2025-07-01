@@ -14,6 +14,12 @@ source "$SCRIPT_DIR/lib/common.sh"
 # Load environment
 load_env "$SCRIPT_DIR/.env"
 
+# Import pfSense network configuration constants
+PFSENSE_LAN_IP="${PFSENSE_LAN_IP:-192.168.1.1}"
+PFSENSE_LAN_SUBNET="${PFSENSE_LAN_SUBNET:-192.168.1.0/24}"
+PFSENSE_DHCP_START="${PFSENSE_DHCP_START:-192.168.1.100}"
+PFSENSE_DHCP_END="${PFSENSE_DHCP_END:-192.168.1.200}"
+
 # Firewall Admin VM configuration constants
 VM_ISO_URL="https://distro.ibiblio.org/puppylinux/puppy-bookwormpup/BookwormPup64/10.0.11/BookwormPup64_10.0.11.iso"
 VM_ISO_PATH="/var/lib/vz/template/iso/BookwormPup64_10.0.11.iso"
@@ -121,13 +127,16 @@ create_firewall_admin_vm() {
         --tablet 1
     
     # Configure LAN interface for pfSense admin access (vmbr1)
-    qm set "$FIREWALL_ADMIN_VM_ID" --net0 "virtio,bridge=vmbr1"
-    log "INFO" "LAN interface configured on vmbr1"
+    # This interface will connect to the same LAN as pfSense for management access
+    qm set "$FIREWALL_ADMIN_VM_ID" --net0 "virtio,bridge=vmbr1,firewall=0"
+    log "INFO" "LAN interface configured on vmbr1 (pfSense management network)"
+    log "INFO" "Expected pfSense LAN IP: ${PFSENSE_LAN_IP:-192.168.1.1}"
+    log "INFO" "Firewall admin should use IP in range: ${PFSENSE_LAN_SUBNET:-192.168.1.0/24}"
     
     # Configure WAN interface for internet access (vmbr0) with MAC address
-    local wan_net_config="virtio,bridge=vmbr0"
+    local wan_net_config="virtio,bridge=vmbr0,firewall=0"
     if [[ -n "${ADDITIONAL_MACS_ARRAY[*]:-}" && ${#ADDITIONAL_MACS_ARRAY[@]} -gt 1 && -n "${ADDITIONAL_MACS_ARRAY[1]}" ]]; then
-        wan_net_config="virtio,bridge=vmbr0,macaddr=${ADDITIONAL_MACS_ARRAY[1]}"
+        wan_net_config="virtio,bridge=vmbr0,firewall=0,macaddr=${ADDITIONAL_MACS_ARRAY[1]}"
         log "INFO" "WAN interface configured with MAC address: ${ADDITIONAL_MACS_ARRAY[1]}"
         log "INFO" "This MAC address should correspond to additional IP: ${ADDITIONAL_IPS_ARRAY[1]:-'Not configured'}"
     else
@@ -146,13 +155,18 @@ create_firewall_admin_vm() {
     log "INFO" "Memory: ${FIREWALL_ADMIN_MEMORY}MB"
     log "INFO" "CPU Cores: $FIREWALL_ADMIN_CORES"
     log "INFO" "Disk: $FIREWALL_ADMIN_DISK_SIZE GB"
-    log "INFO" "LAN Interface: vmbr1 (for pfSense access)"
-    log "INFO" "WAN Interface: vmbr0 (for internet access)"
+    log "INFO" ""
+    log "INFO" "Network Configuration:"
+    log "INFO" "LAN Interface (net0): vmbr1 (pfSense management network)"
+    log "INFO" "  └─ pfSense LAN IP: $PFSENSE_LAN_IP"
+    log "INFO" "  └─ LAN Subnet: $PFSENSE_LAN_SUBNET"
+    log "INFO" "  └─ Available DHCP Range: $PFSENSE_DHCP_START - $PFSENSE_DHCP_END"
+    log "INFO" "WAN Interface (net1): vmbr0 (internet access)"
     if [[ -n "${ADDITIONAL_IPS_ARRAY[1]:-}" ]]; then
-        log "INFO" "Assigned Public IP: ${ADDITIONAL_IPS_ARRAY[1]}"
+        log "INFO" "  └─ Assigned Public IP: ${ADDITIONAL_IPS_ARRAY[1]}"
     fi
     if [[ -n "${ADDITIONAL_MACS_ARRAY[1]:-}" ]]; then
-        log "INFO" "Assigned MAC Address: ${ADDITIONAL_MACS_ARRAY[1]}"
+        log "INFO" "  └─ Assigned MAC Address: ${ADDITIONAL_MACS_ARRAY[1]}"
     fi
 }
 
@@ -193,15 +207,19 @@ OPTIONS:
 
 DESCRIPTION:
     This script creates a VM with dual network interfaces for pfSense administration:
-    - LAN interface (vmbr1) for accessing pfSense web interface
-    - WAN interface (vmbr0) with public IP and MAC address for internet access
+    - LAN interface (net0/vmbr1) for accessing pfSense web interface
+      └─ Connects to pfSense LAN network ($PFSENSE_LAN_SUBNET)
+      └─ pfSense LAN IP: $PFSENSE_LAN_IP
+      └─ DHCP range: $PFSENSE_DHCP_START - $PFSENSE_DHCP_END
+    - WAN interface (net1/vmbr0) with public IP and MAC address for internet access
     
     The VM uses Puppy Linux (~400MB) for faster installation and lower resource usage.
     
     After VM creation, you can:
     1. Start the VM through Proxmox web interface
     2. Boot Puppy Linux from the mounted ISO (runs from RAM)
-    3. Access pfSense admin panel from within the VM
+    3. Configure LAN interface to access pfSense network
+    4. Access pfSense admin panel at https://$PFSENSE_LAN_IP
 
 EXAMPLES:
     $0                  # Create the firewall admin VM
@@ -244,11 +262,19 @@ main() {
     log "INFO" "3. Boot Puppy Linux from the ISO (no installation required - runs from RAM)"
     log "INFO" ""
     log "INFO" "4. Configure network interfaces in Puppy Linux:"
-    log "INFO" "   - LAN Interface: Connect to pfSense network (192.168.1.x/24)"
-    log "INFO" "   - WAN Interface: Use public IP ${ADDITIONAL_IPS_ARRAY[1]:-'(configure in .env)'}"
+    log "INFO" "   - LAN Interface (eth0): Configure as DHCP client or static IP"
+    log "INFO" "     Static IP example: 192.168.1.10/24, Gateway: $PFSENSE_LAN_IP"
+    log "INFO" "     DHCP range: $PFSENSE_DHCP_START - $PFSENSE_DHCP_END"
+    log "INFO" "   - WAN Interface (eth1): Configure with public IP ${ADDITIONAL_IPS_ARRAY[1]:-'(configure in .env)'}"
+    log "INFO" "     Or use DHCP if automatic configuration is available"
     log "INFO" ""
-    log "INFO" "5. Access pfSense admin panel:"
-    log "INFO" "   Open web browser in Puppy Linux and navigate to pfSense LAN IP"
+    log "INFO" "5. Test LAN connectivity to pfSense:"
+    log "INFO" "   ping $PFSENSE_LAN_IP"
+    log "INFO" ""
+    log "INFO" "6. Access pfSense admin panel:"
+    log "INFO" "   Open web browser in Puppy Linux and navigate to:"
+    log "INFO" "   https://$PFSENSE_LAN_IP (or http://$PFSENSE_LAN_IP if HTTPS not configured)"
+    log "INFO" "   Default credentials: admin / pfsense"
     log "INFO" "   Note: You may need to accept the self-signed SSL certificate warning"
     log "INFO" "   pfSense generates its own certificate on first boot"
     log "INFO" ""
