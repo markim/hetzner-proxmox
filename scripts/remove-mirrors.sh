@@ -480,7 +480,7 @@ main() {
         exit 0
     fi
     
-    log "INFO" "Starting ZFS pool removal process..."
+    log "INFO" "Starting ZFS mirror removal process..."
     
     # Show current status
     show_zfs_status
@@ -489,11 +489,11 @@ main() {
     # Execute based on mode
     local exit_code=0
     if [[ "$force" == "true" ]]; then
-        if ! remove_all_pools "true"; then
+        if ! remove_all_mirrors "true"; then
             exit_code=1
         fi
     else
-        if ! interactive_pool_selection; then
+        if ! interactive_mirror_selection; then
             exit_code=1
         fi
     fi
@@ -502,13 +502,13 @@ main() {
     show_zfs_status
     
     if [[ $exit_code -eq 0 ]]; then
-        log "INFO" "✅ ZFS pool removal completed!"
+        log "INFO" "✅ ZFS mirror removal completed!"
         log "INFO" ""
         log "INFO" "Next steps:"
-        log "INFO" "1. Run: ./install.sh --setup-mirrors  # To reconfigure drives"
-        log "INFO" "2. Verify: zpool list                 # Check final ZFS status"
+        log "INFO" "1. Run: ./setup-mirrors.sh        # To add new mirrors to rpool"
+        log "INFO" "2. Verify: zpool status rpool      # Check final ZFS status"
     else
-        log "ERROR" "❌ ZFS pool removal completed with errors!"
+        log "ERROR" "❌ ZFS mirror removal completed with errors!"
     fi
     
     # Explicitly exit with the determined code
