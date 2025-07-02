@@ -1664,6 +1664,81 @@ get_user_confirmation() {
     echo ""
 }
 
+# Parse command line arguments
+parse_arguments() {
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --reset)
+                export RESET_TO_ARIADATA=true
+                log "INFO" "Reset mode enabled - will restore ariadata baseline configuration"
+                shift
+                ;;
+            --fix)
+                export FIX_MODE=true
+                log "INFO" "Fix mode enabled - will check and repair network configuration"
+                shift
+                ;;
+            --status)
+                export STATUS_MODE=true
+                log "INFO" "Status mode enabled - will show current network configuration"
+                shift
+                ;;
+            --verbose|-v)
+                export LOG_LEVEL=DEBUG
+                log "INFO" "Verbose logging enabled"
+                shift
+                ;;
+            --help|-h)
+                show_help
+                exit 0
+                ;;
+            *)
+                log "ERROR" "Unknown option: $1"
+                show_help
+                exit 1
+                ;;
+        esac
+    done
+}
+
+# Show help information
+show_help() {
+    cat << EOF
+Usage: $0 [OPTIONS]
+
+Configure network interfaces for Hetzner Proxmox with additional IPs.
+
+OPTIONS:
+    --reset              Reset network configuration to ariadata pve-install.sh baseline
+    --fix                Check and repair network configuration issues
+    --status             Show current network configuration status
+    --verbose, -v        Enable verbose logging
+    --help, -h          Show this help message
+
+EXAMPLES:
+    $0                   # Configure network with additional IPs (default)
+    $0 --reset           # Reset to ariadata baseline configuration
+    $0 --fix             # Check and fix network issues
+    $0 --status          # Show current configuration
+    $0 --verbose         # Run with detailed logging
+
+NETWORK ARCHITECTURE:
+    Internet → vmbr0 (WAN + Additional IPs) → pfSense VM
+                                               ├── vmbr1 (LAN: 192.168.1.0/24)
+                                               └── vmbr2 (DMZ: 10.0.2.0/24)
+
+ADDITIONAL IP CONFIGURATION:
+    Configure additional IPs in config/additional-ips.conf:
+    IP=203.0.113.10 MAC=00:50:56:00:01:02 GATEWAY=203.0.113.1 NETMASK=255.255.255.192
+
+REQUIREMENTS:
+    - MAC addresses are REQUIRED for Hetzner additional IPs
+    - Get MAC addresses from Hetzner Robot panel or contact support
+    - All additional IPs must route through main gateway
+
+EOF
+}
+
 # Main execution block
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     # Parse command line arguments first
