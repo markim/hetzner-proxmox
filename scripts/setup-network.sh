@@ -1638,38 +1638,30 @@ fix_network_configuration() {
     log "INFO" "Run with --status to verify fixes"
 }
 
-# Parse command line arguments
-parse_arguments() {
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --reset)
-                RESET_TO_ARIADATA=true
-                shift
-                ;;
-            --fix)
-                FIX_MODE=true
-                shift
-                ;;
-            --status)
-                STATUS_MODE=true
-                shift
-                ;;
-            --verbose|-v)
-                LOG_LEVEL="DEBUG"
-                set -x
-                shift
-                ;;
-            --help|-h)
-                show_help
-                exit 0
-                ;;
-            *)
-                log "ERROR" "Unknown option: $1"
-                show_help
-                exit 1
-                ;;
-        esac
-    done
+# Get user confirmation for reset operations
+get_user_confirmation() {
+    local operation_name="$1"
+    echo ""
+    echo "=========================================="
+    echo "⚠️  IMPORTANT: $operation_name"
+    echo "=========================================="
+    echo ""
+    echo "This will modify your network configuration."
+    echo "SSH connectivity will be preserved during changes."
+    echo ""
+    echo "Current network interface: ${SSH_INTERFACE:-unknown}"
+    echo "Current IP address: ${CURRENT_IP:-unknown}"
+    echo ""
+    read -p "Do you want to continue? (yes/no): " -r
+    echo ""
+    
+    if [[ ! $REPLY =~ ^[Yy][Ee][Ss]$ ]]; then
+        log "INFO" "Operation cancelled by user"
+        exit 0
+    fi
+    
+    log "INFO" "User confirmed: $operation_name"
+    echo ""
 }
 
 # Main execution block
@@ -1754,7 +1746,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
         log "INFO" "   - Network bridges are ready for pfSense configuration"
         log "INFO" "   - DMZ network is isolated and ready for public services"
         log "INFO" ""
-        log "INFO" "🚀 Next Steps:"
+        log "INFO" 🚀 Next Steps:"
         log "INFO" "   1. Set up pfSense VM: $(dirname "$0")/../install.sh --pfsense"
         log "INFO" "   2. Configure firewall rules in pfSense"
         log "INFO" "   3. Create VMs/containers using the DMZ network (vmbr2)"
