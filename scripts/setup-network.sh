@@ -1540,12 +1540,27 @@ show_network_status() {
     # Show bridge interfaces
     log "INFO" ""
     log "INFO" "Bridge Interfaces:"
+    
+    # Temporarily disable error exit for the entire bridge processing section
+    set +e
+    
     for bridge in vmbr0 vmbr1 vmbr2; do
+        log "DEBUG" "Processing bridge: $bridge"
+        
         if ip link show "$bridge" >/dev/null 2>&1; then
-            local ip_addr
-            local state
-            ip_addr=$(ip addr show "$bridge" | grep "inet " | awk '{print $2}' | head -n1)
-            state=$(ip link show "$bridge" | grep -o "state [A-Z]*" | cut -d' ' -f2)
+            local ip_addr=""
+            local state=""
+            
+            # Get IP address
+            ip_addr=$(ip addr show "$bridge" 2>/dev/null | grep "inet " | awk '{print $2}' | head -n1)
+            
+            # Get state
+            state=$(ip link show "$bridge" 2>/dev/null | grep -o "state [A-Z]*" | cut -d' ' -f2)
+            
+            # Default state if not found
+            [[ -z "$state" ]] && state="UNKNOWN"
+            
+            log "DEBUG" "Bridge $bridge: state=$state, ip=${ip_addr:-none}"
             
             # Add context for UNKNOWN state
             if [[ "$state" == "UNKNOWN" && -n "$ip_addr" ]]; then
@@ -1556,35 +1571,76 @@ show_network_status() {
         else
             log "INFO" "  $bridge: NOT CONFIGURED"
         fi
+        
+        log "DEBUG" "Completed processing bridge: $bridge"
     done
+    
+    # Re-enable error exit
+    set -e
     
     # Show routing table
     log "INFO" ""
     log "INFO" "Default Routes:"
-    ip route | grep default || log "WARN" "  No default routes found"
+    
+    # Make routing table query safe
+    set +e
+    local route_output
+    route_output=$(ip route 2>/dev/null | grep default)
+    local route_result=$?
+    set -e
+    
+    if [[ $route_result -eq 0 && -n "$route_output" ]]; then
+        echo "$route_output" | while read -r route; do
+            log "INFO" "  $route"
+        done
+    else
+        log "WARN" "  No default routes found"
+    fi
     
     # Show additional IPs if configured
     log "INFO" ""
     log "INFO" "Additional IP Configuration:"
     if [[ -f "$SCRIPT_DIR/config/additional-ips.conf" ]]; then
         log "INFO" "  Config file: $SCRIPT_DIR/config/additional-ips.conf"
-        grep -v "^#" "$SCRIPT_DIR/config/additional-ips.conf" | grep -v "^$" | while read -r line; do
-            log "INFO" "    $line"
-        done
+        
+        # Make config file processing safe
+        set +e
+        local config_lines
+        config_lines=$(grep -v "^#" "$SCRIPT_DIR/config/additional-ips.conf" 2>/dev/null | grep -v "^$")
+        local grep_result=$?
+        set -e
+        
+        if [[ $grep_result -eq 0 && -n "$config_lines" ]]; then
+            echo "$config_lines" | while read -r line; do
+                log "INFO" "    $line"
+            done
+        else
+            log "INFO" "    (config file exists but no valid entries found)"
+        fi
     else
         log "INFO" "  No additional-ips.conf file found"
     fi
     
     # Parse and show parsed additional IPs
+    log "DEBUG" "About to parse additional IPs..."
+    set +e
     parse_additional_ips
-    if [[ -n "${ADDITIONAL_IPS_ARRAY[*]:-}" && ${#ADDITIONAL_IPS_ARRAY[@]} -gt 0 ]]; then
-        log "INFO" ""
-        log "INFO" "Parsed Additional IPs:"
-        for i in "${!ADDITIONAL_IPS_ARRAY[@]}"; do
-            local ip="${ADDITIONAL_IPS_ARRAY[$i]}"
-            local mac="${ADDITIONAL_MACS_ARRAY[$i]:-N/A}"
-            log "INFO" "  IP $((i+1)): $ip (MAC: $mac)"
-        done
+    local parse_result=$?
+    set -e
+    
+    if [[ $parse_result -eq 0 ]]; then
+        log "DEBUG" "Successfully parsed additional IPs"
+        if [[ -n "${ADDITIONAL_IPS_ARRAY[*]:-}" && ${#ADDITIONAL_IPS_ARRAY[@]} -gt 0 ]]; then
+            log "INFO" ""
+            log "INFO" "Parsed Additional IPs:"
+            for i in "${!ADDITIONAL_IPS_ARRAY[@]}"; do
+                local ip="${ADDITIONAL_IPS_ARRAY[$i]}"
+                local mac="${ADDITIONAL_MACS_ARRAY[$i]:-N/A}"
+                log "INFO" "  IP $((i+1)): $ip (MAC: $mac)"
+            done
+        fi
+    else
+        log "WARN" "Failed to parse additional IPs (exit code: $parse_result)"
     fi
     
     log "INFO" ""
