@@ -1546,7 +1546,13 @@ show_network_status() {
             local state
             ip_addr=$(ip addr show "$bridge" | grep "inet " | awk '{print $2}' | head -n1)
             state=$(ip link show "$bridge" | grep -o "state [A-Z]*" | cut -d' ' -f2)
-            log "INFO" "  $bridge: $state - ${ip_addr:-no IP}"
+            
+            # Add context for UNKNOWN state
+            if [[ "$state" == "UNKNOWN" && -n "$ip_addr" ]]; then
+                log "INFO" "  $bridge: $state (active, no ports) - ${ip_addr:-no IP}"
+            else
+                log "INFO" "  $bridge: $state - ${ip_addr:-no IP}"
+            fi
         else
             log "INFO" "  $bridge: NOT CONFIGURED"
         fi
@@ -1660,6 +1666,8 @@ verify_dmz_interface() {
         bridge_state=$(ip link show "$dmz_bridge" | grep -o "state [A-Z]*" | cut -d' ' -f2)
         if [[ "$bridge_state" == "UP" ]]; then
             log "INFO" "✓ DMZ bridge is UP"
+        elif [[ "$bridge_state" == "UNKNOWN" ]]; then
+            log "INFO" "✓ DMZ bridge is active (state: $bridge_state - this is normal for bridges without active ports)"
         else
             log "WARN" "DMZ bridge is not UP (state: $bridge_state)"
             success=false
@@ -1931,7 +1939,12 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
         
         # Verify DMZ interface is properly configured
         log "INFO" "Verifying network configuration..."
-        if verify_dmz_interface; then
+        set +e  # Temporarily disable error exit
+        verify_dmz_interface
+        dmz_result=$?
+        set -e  # Re-enable error exit
+        
+        if [[ $dmz_result -eq 0 ]]; then
             log "INFO" "✓ DMZ verification completed successfully"
         else
             log "WARN" "⚠️  DMZ verification completed with issues (this is often normal on first run)"
