@@ -45,13 +45,13 @@ check_mac_configuration() {
             
             if [[ -n "$mac" ]]; then
                 if is_valid_mac "$mac"; then
-                    printf "${GREEN}✓ MAC: %s${NC}\n" "$mac"
+                    printf "%s✓ MAC: %s%s\n" "$GREEN" "$mac" "$NC"
                 else
-                    printf "${RED}✗ MAC: %s (INVALID FORMAT)${NC}\n" "$mac"
+                    printf "%s✗ MAC: %s (INVALID FORMAT)%s\n" "$RED" "$mac" "$NC"
                     has_issues=true
                 fi
             else
-                printf "${RED}✗ MAC: NOT CONFIGURED${NC}\n"
+                printf "%s✗ MAC: NOT CONFIGURED%s\n" "$RED" "$NC"
                 has_issues=true
             fi
             
@@ -157,15 +157,15 @@ check_vm_mac_addresses() {
                 if [[ -n "$vm_mac" ]]; then
                     printf "  WAN interface MAC: %s" "$vm_mac"
                     if [[ -n "${ADDITIONAL_MACS_ARRAY[0]:-}" ]] && [[ "$vm_mac" == "${ADDITIONAL_MACS_ARRAY[0]}" ]]; then
-                        printf " ${GREEN}✓ MATCHES${NC}\n"
+                        printf " %s✓ MATCHES%s\n" "$GREEN" "$NC"
                     else
-                        printf " ${RED}✗ MISMATCH${NC}\n"
+                        printf " %s✗ MISMATCH%s\n" "$RED" "$NC"
                         if [[ -n "${ADDITIONAL_MACS_ARRAY[0]:-}" ]]; then
                             printf "    Expected: %s\n" "${ADDITIONAL_MACS_ARRAY[0]}"
                         fi
                     fi
                 else
-                    printf "  WAN interface MAC: ${YELLOW}auto-generated${NC}\n"
+                    printf "  WAN interface MAC: %sauto-generated%s\n" "$YELLOW" "$NC"
                 fi
             fi
         fi
@@ -192,15 +192,15 @@ check_vm_mac_addresses() {
                 if [[ -n "$vm_mac" ]]; then
                     printf "  WAN interface MAC: %s" "$vm_mac"
                     if [[ -n "${ADDITIONAL_MACS_ARRAY[1]:-}" ]] && [[ "$vm_mac" == "${ADDITIONAL_MACS_ARRAY[1]}" ]]; then
-                        printf " ${GREEN}✓ MATCHES${NC}\n"
+                        printf " %s✓ MATCHES%s\n" "$GREEN" "$NC"
                     else
-                        printf " ${RED}✗ MISMATCH${NC}\n"
+                        printf " %s✗ MISMATCH%s\n" "$RED" "$NC"
                         if [[ -n "${ADDITIONAL_MACS_ARRAY[1]:-}" ]]; then
                             printf "    Expected: %s\n" "${ADDITIONAL_MACS_ARRAY[1]}"
                         fi
                     fi
                 else
-                    printf "  WAN interface MAC: ${YELLOW}auto-generated${NC}\n"
+                    printf "  WAN interface MAC: %sauto-generated%s\n" "$YELLOW" "$NC"
                 fi
             fi
         fi

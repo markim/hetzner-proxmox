@@ -733,13 +733,14 @@ EOF
             log "DEBUG" "Converted netmask $netmask to CIDR /$cidr"
             log "INFO" "Adding IP $ip/$cidr with gateway $gateway"
             
-            echo "    post-up ip addr add $ip/$cidr dev vmbr0" >> "$temp_config"
-            echo "    post-down ip addr del $ip/$cidr dev vmbr0" >> "$temp_config"
-            
-            # For Hetzner additional IPs, all traffic must route through main gateway
-            # Add specific route for this IP through the main gateway
-            echo "    post-up ip route add $ip/32 dev vmbr0 table main" >> "$temp_config"
-            echo "    post-down ip route del $ip/32 dev vmbr0 table main" >> "$temp_config"
+            {
+                echo "    post-up ip addr add $ip/$cidr dev vmbr0"
+                echo "    post-down ip addr del $ip/$cidr dev vmbr0"
+                # For Hetzner additional IPs, all traffic must route through main gateway
+                # Add specific route for this IP through the main gateway
+                echo "    post-up ip route add $ip/32 dev vmbr0 table main"
+                echo "    post-down ip route del $ip/32 dev vmbr0 table main"
+            } >> "$temp_config"
             
             # Add MAC address configuration if provided - CRITICAL for Hetzner routing
             if [[ -n "$mac" ]]; then
@@ -1541,8 +1542,10 @@ show_network_status() {
     log "INFO" "Bridge Interfaces:"
     for bridge in vmbr0 vmbr1 vmbr2; do
         if ip link show "$bridge" >/dev/null 2>&1; then
-            local ip_addr=$(ip addr show "$bridge" | grep "inet " | awk '{print $2}' | head -n1)
-            local state=$(ip link show "$bridge" | grep -o "state [A-Z]*" | cut -d' ' -f2)
+            local ip_addr
+            local state
+            ip_addr=$(ip addr show "$bridge" | grep "inet " | awk '{print $2}' | head -n1)
+            state=$(ip link show "$bridge" | grep -o "state [A-Z]*" | cut -d' ' -f2)
             log "INFO" "  $bridge: $state - ${ip_addr:-no IP}"
         else
             log "INFO" "  $bridge: NOT CONFIGURED"
@@ -1582,6 +1585,128 @@ show_network_status() {
     log "INFO" "=== STATUS CHECK COMPLETE ==="
 }
 
+# Ensure network configuration is properly running
+ensure_network_configuration() {
+    log "INFO" "=== ENSURING NETWORK CONFIGURATION IS ACTIVE ==="
+    
+    # Wait for networking to stabilize
+    log "INFO" "Waiting for network to stabilize..."
+    sleep 5
+    
+    # Check if main bridge interfaces exist and are up
+    local required_bridges=("vmbr0" "vmbr1" "vmbr2")
+    local missing_bridges=()
+    
+    for bridge in "${required_bridges[@]}"; do
+        if ! ip link show "$bridge" >/dev/null 2>&1; then
+            missing_bridges+=("$bridge")
+        else
+            local state
+            state=$(ip link show "$bridge" | grep -o "state [A-Z]*" | cut -d' ' -f2)
+            if [[ "$state" != "UP" ]]; then
+                log "INFO" "Bringing up bridge: $bridge"
+                ip link set "$bridge" up 2>/dev/null || log "WARN" "Failed to bring up $bridge"
+            fi
+        fi
+    done
+    
+    if [[ ${#missing_bridges[@]} -gt 0 ]]; then
+        log "WARN" "Missing bridges: ${missing_bridges[*]}"
+        log "WARN" "These may be created during the configuration process"
+    fi
+    
+    # Verify primary IP is still accessible
+    local primary_ip
+    primary_ip=$(ip route get 8.8.8.8 | grep -Po 'src \K[0-9.]+' | head -n1)
+    if [[ -n "$primary_ip" ]]; then
+        log "INFO" "Primary IP accessible: $primary_ip"
+    else
+        log "WARN" "Could not determine primary IP"
+    fi
+    
+    # Check if SSH is still accessible
+    local ssh_port
+    ssh_port=$(ss -tlnp | grep -c ':22 ')
+    if [[ $ssh_port -gt 0 ]]; then
+        log "INFO" "SSH service is accessible"
+    else
+        log "WARN" "SSH service may not be accessible"
+    fi
+    
+    # Verify routing is working
+    if ping -c 1 -W 3 8.8.8.8 >/dev/null 2>&1; then
+        log "INFO" "Internet connectivity verified"
+    else
+        log "WARN" "Internet connectivity test failed"
+    fi
+    
+    log "INFO" "Network configuration stability check completed"
+}
+
+# Verify DMZ interface is properly configured
+verify_dmz_interface() {
+    log "INFO" "=== VERIFYING DMZ INTERFACE CONFIGURATION ==="
+    
+    local dmz_bridge="vmbr2"
+    local dmz_ip="10.0.2.1"
+    local success=true
+    
+    # Check if DMZ bridge exists
+    if ! ip link show "$dmz_bridge" >/dev/null 2>&1; then
+        log "WARN" "DMZ bridge ($dmz_bridge) not found"
+        success=false
+    else
+        local bridge_state
+        bridge_state=$(ip link show "$dmz_bridge" | grep -o "state [A-Z]*" | cut -d' ' -f2)
+        if [[ "$bridge_state" == "UP" ]]; then
+            log "INFO" "✓ DMZ bridge is UP"
+        else
+            log "WARN" "DMZ bridge is not UP (state: $bridge_state)"
+            success=false
+        fi
+        
+        # Check if DMZ IP is configured
+        local current_dmz_ip
+        current_dmz_ip=$(ip addr show "$dmz_bridge" | grep "inet " | awk '{print $2}' | head -n1)
+        if [[ "$current_dmz_ip" == "${dmz_ip}/24" ]]; then
+            log "INFO" "✓ DMZ IP correctly configured: $current_dmz_ip"
+        else
+            log "WARN" "DMZ IP not correctly configured (expected: ${dmz_ip}/24, found: ${current_dmz_ip:-none})"
+            success=false
+        fi
+    fi
+    
+    # Check if DMZ network configuration exists in interfaces file
+    if [[ -f "$INTERFACES_FILE" ]]; then
+        if grep -q "auto $dmz_bridge" "$INTERFACES_FILE" && grep -q "address $dmz_ip" "$INTERFACES_FILE"; then
+            log "INFO" "✓ DMZ configuration found in interfaces file"
+        else
+            log "WARN" "DMZ configuration not found in interfaces file"
+            success=false
+        fi
+    else
+        log "WARN" "Interfaces file not found: $INTERFACES_FILE"
+        success=false
+    fi
+    
+    # Check if DMZ can be used for routing (basic connectivity test)
+    if ip link show "$dmz_bridge" >/dev/null 2>&1; then
+        if ping -c 1 -W 1 -I "$dmz_bridge" "$dmz_ip" >/dev/null 2>&1; then
+            log "INFO" "✓ DMZ interface responds to ping"
+        else
+            log "DEBUG" "DMZ interface ping test failed (this is normal if no VMs are connected)"
+        fi
+    fi
+    
+    if [[ "$success" == true ]]; then
+        log "INFO" "✓ DMZ interface verification passed"
+        return 0
+    else
+        log "WARN" "DMZ interface verification completed with issues"
+        return 1
+    fi
+}
+
 # Fix network configuration issues
 fix_network_configuration() {
     log "INFO" "=== FIXING NETWORK CONFIGURATION ==="
@@ -1594,15 +1719,18 @@ fix_network_configuration() {
         log "WARN" "vmbr1 bridge missing - this will be created during full network setup"
         log "INFO" "Run without --fix to perform full network configuration"
     else
-        local vmbr1_ip=$(ip addr show vmbr1 | grep "inet " | awk '{print $2}' | cut -d'/' -f1 | head -n1)
+        local vmbr1_ip
+        vmbr1_ip=$(ip addr show vmbr1 | grep "inet " | awk '{print $2}' | cut -d'/' -f1 | head -n1)
         if [[ "$vmbr1_ip" != "192.168.1.10" ]]; then
             log "INFO" "Fixing vmbr1 IP address..."
             if [[ -n "$vmbr1_ip" ]]; then
                 ip addr del "${vmbr1_ip}/24" dev vmbr1 2>/dev/null || true
             fi
-            ip addr add 192.168.1.10/24 dev vmbr1 2>/dev/null && \
-                log "INFO" "✓ Fixed vmbr1 IP to 192.168.1.10/24" || \
+            if ip addr add 192.168.1.10/24 dev vmbr1 2>/dev/null; then
+                log "INFO" "✓ Fixed vmbr1 IP to 192.168.1.10/24"
+            else
                 log "ERROR" "Failed to fix vmbr1 IP"
+            fi
         else
             log "INFO" "✓ vmbr1 IP is correct: $vmbr1_ip"
         fi
@@ -1612,15 +1740,18 @@ fix_network_configuration() {
     if ! ip link show vmbr2 >/dev/null 2>&1; then
         log "WARN" "vmbr2 bridge missing - this will be created during full network setup"
     else
-        local vmbr2_ip=$(ip addr show vmbr2 | grep "inet " | awk '{print $2}' | cut -d'/' -f1 | head -n1)
+        local vmbr2_ip
+        vmbr2_ip=$(ip addr show vmbr2 | grep "inet " | awk '{print $2}' | cut -d'/' -f1 | head -n1)
         if [[ "$vmbr2_ip" != "10.0.2.1" ]]; then
             log "INFO" "Fixing vmbr2 IP address..."
             if [[ -n "$vmbr2_ip" ]]; then
                 ip addr del "${vmbr2_ip}/24" dev vmbr2 2>/dev/null || true
             fi
-            ip addr add 10.0.2.1/24 dev vmbr2 2>/dev/null && \
-                log "INFO" "✓ Fixed vmbr2 IP to 10.0.2.1/24" || \
+            if ip addr add 10.0.2.1/24 dev vmbr2 2>/dev/null; then
+                log "INFO" "✓ Fixed vmbr2 IP to 10.0.2.1/24"
+            else
                 log "ERROR" "Failed to fix vmbr2 IP"
+            fi
         else
             log "INFO" "✓ vmbr2 IP is correct: $vmbr2_ip"
         fi
